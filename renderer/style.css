@@ -1,4 +1,4 @@
-﻿/* ─── 基础重置 ─────────────────────────────────────── */
+/* ─── 基础重置 ─────────────────────────────────────── */
 * {
     margin: 0;
     padding: 0;
@@ -25,8 +25,8 @@ body {
     position: absolute;
     left: 0;
     top: 0;
-    width: 220px;
-    height: 260px; /* extra headroom for multi-line bubbles */
+    width: 300px;
+    height: 280px;
     overflow: hidden;
     pointer-events: none;
     transform-origin: top left;
@@ -87,10 +87,11 @@ body {
     bottom: 122px; /* anchored just above the crab, grows upward with its text */
     transform: translateX(-50%) translateY(6px);
     width: max-content;
-    max-width: 208px;
+    max-width: 262px; /* fits the 300px stage with room for the border */
     max-height: 132px;
     overflow: hidden;
     padding: 6px 10px 8px;
+    overflow-wrap: anywhere;
 
     background: #fff;
     color: #1a1a2e;
@@ -323,14 +324,14 @@ body {
 /* Rotate the sprite so its feet face the wall, and shift the container so the
    feet touch the window edge (window itself sits flush against the screen edge). */
 #pet-container.climb-right {
-    transform: translateX(calc(-50% + 55px)) scale(0.55);
+    transform: translateX(calc(-50% + 95px)) scale(0.55);
 }
 #pet-container.climb-right #pet-sprite {
     transform: rotate(-90deg);
     transform-origin: 50% 50%;
 }
 #pet-container.climb-left {
-    transform: translateX(calc(-50% - 55px)) scale(0.55);
+    transform: translateX(calc(-50% - 95px)) scale(0.55);
 }
 #pet-container.climb-left #pet-sprite {
     transform: rotate(90deg);

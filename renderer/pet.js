@@ -186,6 +186,14 @@ function showSpeech(text, durationMs) {
   }
   bubbleText.textContent = text;
   bubble.classList.add("show-bubble");
+  if (window.__petDebug) {
+    const r = bubble.getBoundingClientRect();
+    const cs = getComputedStyle(bubble);
+    console.log(
+      `[pet] bubble box=${bubble.offsetWidth}x${bubble.offsetHeight} scroll=${bubble.scrollWidth}x${bubble.scrollHeight} ` +
+        `rect=${Math.round(r.left)}..${Math.round(r.right)} maxW=${cs.maxWidth} w=${cs.width} bs=${cs.boxSizing} ws=${cs.whiteSpace} stage=${document.getElementById("pet-stage").offsetWidth}`,
+    );
+  }
   speechTimer = setTimeout(() => {
     bubble.classList.remove("show-bubble");
     speechTimer = null;
@@ -284,7 +292,8 @@ async function showUsage(engine) {
       showSpeech("Couldn't read today's usage 🤔", 3000);
     } else {
       const inTok = (u.inputTokens || 0) + (u.cacheCreationTokens || 0);
-      const models = (u.models || []).map((m) => m.replace(/^claude-/, "")).join(", ");
+      const all = (u.models || []).map((m) => m.replace(/^claude-/, ""));
+      const models = all.length > 2 ? `${all.slice(0, 2).join(", ")} +${all.length - 2}` : all.join(", ");
       const cost = typeof u.totalCost === "number" ? `Today ≈ $${u.totalCost.toFixed(2)}` : "Today (pricing unavailable)";
       showSpeech(
         `${cost}\nout ${formatTokens(u.outputTokens)} · in ${formatTokens(inTok)} · cache ${formatTokens(u.cacheReadTokens)}` +
@@ -302,8 +311,8 @@ async function showUsage(engine) {
 
 // ── Roaming: walk the bottom edge, climb walls, fall, tuck away ──
 
-const WIN_W = 220;
-const WIN_H = 260;
+const WIN_W = 300;
+const WIN_H = 280;
 
 let engineRef = null;
 let roamEnabled = true;
@@ -1048,6 +1057,7 @@ async function loadSavedPet(engine) {
 // ── Init ───────────────────────────────────────────────────
 
 function main() {
+  window.__petDebug = false; // set true to log bubble layout metrics as [pet] console lines
   const spriteEl = document.getElementById("pet-sprite");
   if (!spriteEl) return;
   const engine = new PetEngine(spriteEl, CODEX_ATLAS);

@@ -94,8 +94,8 @@ function startApp() {
     saveConfig({ currentPetId: petId });
   }
 
-  const WIN_W = 220;
-  const WIN_H = 260;
+  const WIN_W = 300;
+  const WIN_H = 280;
 
   // ─── Pet window ──────────────────────────────────────
   function createWindow() {
@@ -128,6 +128,7 @@ function startApp() {
         preload: path.join(__dirname, "preload.js"),
         contextIsolation: true,
         nodeIntegration: false,
+        zoomFactor: 1,
       },
     });
 
@@ -139,10 +140,17 @@ function startApp() {
     mainWindow.webContents.on("did-finish-load", () => {
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.setTitle(" ");
+        // Pin 1 CSS px = 1 window px. On a scaled display the renderer would
+        // otherwise zoom (e.g. 1.25x), pushing the pet off-centre and clipping bubbles.
+        mainWindow.webContents.setZoomFactor(1);
         if (fullscreenActive) mainWindow.webContents.send("fullscreen-change", true);
       }
     });
     mainWindow.setIgnoreMouseEvents(false);
+    // Surface renderer console output in the terminal (handy when running `npm start`)
+    mainWindow.webContents.on("console-message", (event, level, message) => {
+      if (message && message.startsWith("[pet]")) console.log(message);
+    });
     mainWindow.on("closed", () => {
       mainWindow = null;
     });
@@ -397,6 +405,26 @@ function startApp() {
         getUsage().then((data) => {
           res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
           res.end(JSON.stringify(data));
+        });
+        return;
+      }
+      if (req.method === "POST" && req.url === "/action") {
+        // Trigger any context-menu action remotely (testing / screenshots)
+        let body = "";
+        req.setEncoding("utf8");
+        req.on("data", (chunk) => (body += chunk));
+        req.on("end", () => {
+          let action = "";
+          try {
+            action = String(JSON.parse(body).action || "");
+          } catch (e) {
+            /* ignore */
+          }
+          if (action && action !== "quit" && action !== "restart") {
+            sendToRenderer("menu-action", action);
+          }
+          res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: true, action }));
         });
         return;
       }
