@@ -1,5 +1,5 @@
-// ─── 环境检查 ───────────────────────────────────────
-// 如果 ELECTRON_RUN_AS_NODE=1，Electron 会以 Node.js 模式运行，需要清除该变量后重新启动
+// ─── Environment guard ───────────────────────────────────
+// If ELECTRON_RUN_AS_NODE=1 is set, Electron runs as plain Node; clear it and relaunch.
 if (process.env.ELECTRON_RUN_AS_NODE === "1") {
   delete process.env.ELECTRON_RUN_AS_NODE;
   const { spawn } = require("child_process");
@@ -8,7 +8,6 @@ if (process.env.ELECTRON_RUN_AS_NODE === "1") {
     env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined },
   });
   child.on("exit", (code) => process.exit(code));
-  // 保持进程存活直到子进程退出
   setInterval(() => {}, 1000);
 } else {
   startApp();
@@ -22,15 +21,30 @@ function startApp() {
     ipcMain,
     Notification,
     dialog,
+    Tray,
+    Menu,
+    nativeImage,
+    powerMonitor,
   } = require("electron");
   const http = require("http");
   const path = require("path");
   const fs = require("fs");
   const os = require("os");
+  const { spawn } = require("child_process");
   const AdmZip = require("adm-zip");
+
+  // Only one Claw'd at a time (matters with auto-start)
+  if (!app.requestSingleInstanceLock()) {
+    app.quit();
+    return;
+  }
 
   let mainWindow = null;
   let httpServer = null;
+  let tray = null;
+  let fsWatcher = null;
+  let fullscreenActive = false;
+  let quitting = false;
   const PORT = 31126;
 
   const STATUS = {
@@ -45,40 +59,45 @@ function startApp() {
   let statusMessage = "";
   let prevStatus = STATUS.IDLE;
   let completedTimer = null;
+  let runningSince = 0; // when we entered "running" — short chatty turns don't notify
 
-  // ─── 宠物存储目录 ────────────────────────────────
+  // ─── Config (userData/pet-config.json) ───────────────
+  function configPath() {
+    return path.join(app.getPath("userData"), "pet-config.json");
+  }
+  function loadConfig() {
+    try {
+      return JSON.parse(fs.readFileSync(configPath(), "utf8"));
+    } catch (e) {
+      return {};
+    }
+  }
+  function saveConfig(patch) {
+    const cfg = { ...loadConfig(), ...patch };
+    try {
+      fs.writeFileSync(configPath(), JSON.stringify(cfg, null, 2), "utf8");
+    } catch (e) {
+      /* ignore */
+    }
+    return cfg;
+  }
+
   function getPetsDir() {
     const dir = path.join(app.getPath("userData"), "pets");
     fs.mkdirSync(dir, { recursive: true });
     return dir;
   }
-
   function getCurrentPetId() {
-    try {
-      const configPath = path.join(app.getPath("userData"), "pet-config.json");
-      if (fs.existsSync(configPath)) {
-        const cfg = JSON.parse(fs.readFileSync(configPath, "utf8"));
-        return cfg.currentPetId || "";
-      }
-    } catch (e) { /* ignore */ }
-    return "";
+    return loadConfig().currentPetId || "";
   }
-
   function setCurrentPetId(petId) {
-    try {
-      const configPath = path.join(app.getPath("userData"), "pet-config.json");
-      let cfg = {};
-      try {
-        cfg = JSON.parse(fs.readFileSync(configPath, "utf8"));
-      } catch (e) { /* ignore */ }
-      cfg.currentPetId = petId;
-      fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2), "utf8");
-    } catch (e) { /* ignore */ }
+    saveConfig({ currentPetId: petId });
   }
 
   const WIN_W = 220;
-  const WIN_H = 200;
-  // ─── 创建桌面宠物窗口 ────────────────────────────
+  const WIN_H = 260;
+
+  // ─── Pet window ──────────────────────────────────────
   function createWindow() {
     const { width: screenWidth, height: screenHeight } =
       screen.getPrimaryDisplay().workAreaSize;
@@ -91,18 +110,17 @@ function startApp() {
       minHeight: WIN_H,
       maxHeight: WIN_H,
       x: Math.round(screenWidth - WIN_W),
-      y: Math.round(screenHeight - WIN_H - 20),
+      y: Math.round(screenHeight - WIN_H),
 
       title: " ",
       frame: false,
       transparent: true,
-      backgroundColor: '#00000000',
+      backgroundColor: "#00000000",
       alwaysOnTop: true,
       resizable: false,
       maximizable: false,
       fullscreenable: false,
       autoHideMenuBar: true,
-
       skipTaskbar: true,
       hasShadow: false,
 
@@ -116,21 +134,27 @@ function startApp() {
     mainWindow.setMenuBarVisibility(false);
     mainWindow.setTitle(" ");
     mainWindow.setAlwaysOnTop(true, "screen-saver");
-    mainWindow.setBackgroundColor('#00000000');
-
+    mainWindow.setBackgroundColor("#00000000");
     mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
     mainWindow.webContents.on("did-finish-load", () => {
-      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.setTitle(" ");
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.setTitle(" ");
+        if (fullscreenActive) mainWindow.webContents.send("fullscreen-change", true);
+      }
     });
-
     mainWindow.setIgnoreMouseEvents(false);
-
     mainWindow.on("closed", () => {
       mainWindow = null;
     });
   }
 
-  // ─── 状态推送 ─────────────────────────────────────
+  function sendToRenderer(channel, payload) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send(channel, payload);
+    }
+  }
+
+  // ─── Status pipeline ─────────────────────────────────
   function pushStatus(status, message = "") {
     if (status === currentStatus && message === statusMessage) return;
 
@@ -143,14 +167,16 @@ function startApp() {
       completedTimer = null;
     }
 
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send("status-update", { status, message });
+    sendToRenderer("status-update", { status, message });
+
+    if (status === STATUS.RUNNING && prevStatus !== STATUS.RUNNING) {
+      runningSince = Date.now();
     }
 
-    // waiting + 有消息 = 真正需要用户确认（Notification 事件）→ 弹通知，不自动消失
-    // waiting + 无消息 = Stop 事件，Claude 本轮结束但可能继续 → 15秒后自动回 idle
+    // waiting + message = Claude needs a decision (Notification hook) → notify, stays until next event
+    // waiting + no message = turn ended but may continue → back to idle after 15s
     if (status === STATUS.WAITING && message && prevStatus !== STATUS.WAITING) {
-      sendNotification("⚠️ Claude Code 需要确认", message);
+      sendNotification("🦀 Claude is waiting for you", message);
     }
     if (status === STATUS.WAITING && !message) {
       completedTimer = setTimeout(() => {
@@ -161,7 +187,10 @@ function startApp() {
     }
 
     if (status === STATUS.COMPLETED && prevStatus !== STATUS.COMPLETED) {
-      sendNotification("✅ Claude Code 任务完成", message || "任务已完成");
+      // Only runs longer than 15s get a system notification — quick chat turns stay quiet
+      if (runningSince && Date.now() - runningSince > 15000) {
+        sendNotification("🦀 Ready to move on", message || "Claude finished this turn — go take a look");
+      }
       completedTimer = setTimeout(() => {
         if (currentStatus === STATUS.COMPLETED) {
           pushStatus(STATUS.IDLE, "");
@@ -169,7 +198,7 @@ function startApp() {
       }, 10000);
     }
     if (status === STATUS.ERROR && prevStatus !== STATUS.ERROR) {
-      sendNotification("❌ Claude Code 错误", message || "出现错误");
+      sendNotification("🦀 Claude hit an error", message || "Something went wrong");
       completedTimer = setTimeout(() => {
         if (currentStatus === STATUS.ERROR) {
           pushStatus(STATUS.IDLE, "");
@@ -184,11 +213,11 @@ function startApp() {
         new Notification({ title, body }).show();
       }
     } catch (e) {
-      // ignore
+      /* ignore */
     }
   }
 
-  // ─── 自动配置 Claude Code hooks ───────────────────
+  // ─── Legacy auto hook config (off by default; use scripts/setup-hooks.js instead) ──
   function autoConfigHooks() {
     const claudeDir = path.join(os.homedir(), ".claude");
     const settingsPath = path.join(claudeDir, "settings.json");
@@ -198,89 +227,120 @@ function startApp() {
     } catch (e) {
       settings = {};
     }
-
     if (!settings.hooks) settings.hooks = {};
-
-    const hooksDir = path.join(__dirname, "hooks");
-    const notifyScript = path.join(hooksDir, "notify.js");
-    const marker = "ccpet-notify";
-
-    // 每个事件需要单独的命令（事件名作为 argv[2] 传入）
-    // 参考 clawd-on-desk 的 buildCommandHookSpec
-    const events = [
-      "PreToolUse", "PostToolUse", "PostToolUseFailure",
-      "Stop", "StopFailure",
-      "Notification", "Elicitation",
-      "SubagentStart", "SubagentStop",
-      "PreCompact", "PostCompact",
-      "SessionStart", "SessionEnd",
-    ];
-
+    const notifyScript = path.join(__dirname, "hooks", "notify.js");
+    const marker = notifyScript.replace(/\\/g, "/").toLowerCase();
+    const events = ["SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "Notification"];
     let changed = false;
-
     for (const event of events) {
-      if (!Array.isArray(settings.hooks[event])) {
-        settings.hooks[event] = [];
-      }
-
-      // 检查是否已有我们的 hook（通过 marker 识别）
-      const existing = settings.hooks[event].find(
-        (entry) =>
-          entry.hooks &&
-          entry.hooks.some(
-            (h) => h.command && h.command.includes(marker),
-          ),
+      if (!Array.isArray(settings.hooks[event])) settings.hooks[event] = [];
+      const exists = settings.hooks[event].some(
+        (entry) => entry.hooks && entry.hooks.some((h) => h.command && h.command.replace(/\\/g, "/").toLowerCase().includes(marker)),
       );
-
-      if (existing) {
-        // 更新已有的 hook（确保命令格式正确）
-        const hook = existing.hooks.find(
-          (h) => h.command && h.command.includes(marker),
-        );
-        const newCommand = process.platform === "win32"
-          ? `& "node" "${notifyScript}" ${event}`
-          : `node "${notifyScript}" ${event}`;
-        if (hook.command !== newCommand) {
-          hook.command = newCommand;
-          if (process.platform === "win32") hook.shell = "powershell";
-          changed = true;
-        }
-      } else {
-        // 注册新 hook
-        const hookDef = {
-          type: "command",
-          command: process.platform === "win32"
-            ? `& "node" "${notifyScript}" ${event}`
-            : `node "${notifyScript}" ${event}`,
-          async: true,
-          timeout: 5,
-        };
-        if (process.platform === "win32") {
-          hookDef.shell = "powershell";
-        }
-        settings.hooks[event].push({
-          matcher: "",
-          hooks: [hookDef],
-        });
+      if (!exists) {
+        const entry = { hooks: [{ type: "command", command: `node "${notifyScript}" ${event}`, timeout: 10 }] };
+        if (event === "PreToolUse" || event === "PostToolUse") entry.matcher = "";
+        settings.hooks[event].push(entry);
         changed = true;
       }
     }
-
     if (changed) {
       try {
-        fs.writeFileSync(
-          settingsPath,
-          JSON.stringify(settings, null, 2),
-          "utf8",
-        );
-        console.log("[CCPet] 已自动配置 Claude Code hooks");
+        fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), "utf8");
+        console.log("[CCPet] Claude Code hooks configured");
       } catch (e) {
-        console.error("[CCPet] 配置 hooks 失败:", e.message);
+        console.error("[CCPet] hook config failed:", e.message);
       }
     }
   }
 
-  // ─── HTTP 状态接收服务器 ─────────────────────────
+  // ─── Concurrent Claude Code sessions (from hook payloads) ──
+  const sessions = new Map(); // session_id → { cwd, name, lastSeen }
+
+  function sessionSummary() {
+    return {
+      count: sessions.size,
+      names: Array.from(sessions.values())
+        .map((s) => s.name)
+        .filter(Boolean),
+    };
+  }
+  function broadcastSessions() {
+    sendToRenderer("sessions-update", sessionSummary());
+  }
+  function touchSession(id, cwd, event) {
+    if (!id) return;
+    if (event === "SessionEnd") {
+      if (sessions.delete(id)) broadcastSessions();
+      return;
+    }
+    const prev = sessions.get(id) || {};
+    const before = sessions.size;
+    sessions.set(id, {
+      cwd: cwd || prev.cwd || "",
+      name: cwd ? path.basename(cwd) : prev.name || "",
+      lastSeen: Date.now(),
+    });
+    if (sessions.size !== before) broadcastSessions();
+  }
+  // Sessions that died without a SessionEnd hook fall off after 3h of silence
+  setInterval(() => {
+    const cutoff = Date.now() - 3 * 3600 * 1000;
+    let changed = false;
+    for (const [id, s] of sessions) {
+      if (s.lastSeen < cutoff) {
+        sessions.delete(id);
+        changed = true;
+      }
+    }
+    if (changed) broadcastSessions();
+  }, 60000);
+
+  // ─── Native context menu (not clipped by the tiny pet window) ──
+  function menuAction(action) {
+    sendToRenderer("menu-action", action);
+  }
+  ipcMain.on("show-menu", (event, state) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    const s = state || {};
+    const template = [
+      { label: "📊 Today's usage", click: () => menuAction("usage") },
+      { label: `🚶 Roam: ${s.roam ? "On" : "Off"}`, click: () => menuAction("toggle-roam") },
+      { label: s.hidden ? "👋 Come back" : "🫣 Tuck to edge", click: () => menuAction("toggle-hide") },
+      {
+        label: "🚀 Start with Windows",
+        type: "checkbox",
+        enabled: autoStartSupported(),
+        checked: autoStartEnabled(),
+        click: () => menuAction("toggle-autostart"),
+      },
+      { type: "separator" },
+      {
+        label: "🎭 Tricks",
+        submenu: [
+          { label: "👋 Wave", click: () => menuAction("wave") },
+          { label: "⬆️ Jump", click: () => menuAction("jump") },
+          { label: "🤸 Backflip", click: () => menuAction("backflip") },
+          { label: "🤔 Think", click: () => menuAction("think") },
+          { label: "🌸 Flower", click: () => menuAction("flower") },
+          { label: "🍟 Snack time", click: () => menuAction("snack") },
+          { label: "😴 Nap", click: () => menuAction("nap") },
+        ],
+      },
+      { type: "separator" },
+      { label: "📥 Import pet…", click: () => menuAction("import-pet") },
+      { label: "📌 Always on top", type: "checkbox", checked: !!s.onTop, click: () => menuAction("toggle-top") },
+      { type: "separator" },
+      { label: "🔄 Restart", click: () => restartApp() },
+      { label: "🚪 Quit", click: () => menuAction("quit") },
+    ];
+    Menu.buildFromTemplate(template).popup({
+      window: mainWindow,
+      callback: () => sendToRenderer("menu-closed"),
+    });
+  });
+
+  // ─── HTTP status server ──────────────────────────────
   function startHttpServer() {
     httpServer = http.createServer((req, res) => {
       res.setHeader("Access-Control-Allow-Origin", "*");
@@ -292,23 +352,31 @@ function startApp() {
         res.end();
         return;
       }
-
       if (req.method === "GET" && req.url === "/status") {
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
         res.end(
-          JSON.stringify({ status: currentStatus, message: statusMessage }),
+          JSON.stringify({
+            status: currentStatus,
+            message: statusMessage,
+            fullscreen: fullscreenActive,
+            sessions: sessionSummary(),
+          }),
         );
         return;
       }
-
       if (req.method === "POST" && req.url === "/status") {
         let body = "";
         req.setEncoding("utf8");
         req.on("data", (chunk) => (body += chunk));
         req.on("end", () => {
           try {
-            const data = JSON.parse(body);
-            const { status, message } = data;
+            const { status, sessionId, cwd, event } = JSON.parse(body);
+            let { message } = JSON.parse(body);
+            touchSession(sessionId, cwd, event);
+            // With several sessions running, tag live bubbles with the project name
+            if (sessions.size >= 2 && cwd && message && (status === "running" || status === "waiting")) {
+              message = `[${path.basename(cwd)}] ${message}`;
+            }
             if (Object.values(STATUS).includes(status)) {
               pushStatus(status, message || "");
               res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
@@ -324,164 +392,569 @@ function startApp() {
         });
         return;
       }
-
+      // Debug helpers (localhost only): usage/cost readout, simulate fullscreen on/off
+      if (req.method === "GET" && req.url === "/usage") {
+        getUsage().then((data) => {
+          res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify(data));
+        });
+        return;
+      }
+      if (req.method === "POST" && req.url === "/restart") {
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true }));
+        setTimeout(restartApp, 200);
+        return;
+      }
+      if (req.method === "POST" && req.url === "/idle") {
+        // Simulate system idle seconds for 90s (testing doze/sleep)
+        let body = "";
+        req.setEncoding("utf8");
+        req.on("data", (chunk) => (body += chunk));
+        req.on("end", () => {
+          let seconds = 0;
+          try {
+            seconds = Number(JSON.parse(body).seconds) || 0;
+          } catch (e) {
+            /* ignore */
+          }
+          idleOverride = { seconds, until: Date.now() + 90000 };
+          sendToRenderer("system-idle", seconds);
+          res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: true, seconds }));
+        });
+        return;
+      }
+      if (req.method === "POST" && req.url === "/fullscreen") {
+        let body = "";
+        req.setEncoding("utf8");
+        req.on("data", (chunk) => (body += chunk));
+        req.on("end", () => {
+          let active = false;
+          try {
+            active = !!JSON.parse(body).active;
+          } catch (e) {
+            /* ignore */
+          }
+          fullscreenActive = active;
+          sendToRenderer("fullscreen-change", active);
+          res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: true, fullscreen: active }));
+        });
+        return;
+      }
       res.writeHead(404);
       res.end("Not Found");
     });
 
+    httpServer.on("error", (e) => {
+      console.error("[CCPet] status server error:", e.message);
+    });
     httpServer.listen(PORT, "127.0.0.1", () => {
-      console.log(`[CCPet] 状态服务已启动: http://127.0.0.1:${PORT}`);
+      console.log(`[CCPet] status server: http://127.0.0.1:${PORT}`);
     });
   }
 
-  // ─── IPC 事件 ────────────────────────────────────
-
-  ipcMain.on("set-ignore-mouse", (event, ignore) => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.setIgnoreMouseEvents(ignore ? false : false);
-    }
-  });
-
-  ipcMain.handle("get-window-position", () => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      return mainWindow.getPosition();
-    }
-    return [0, 0];
-  });
-
-  ipcMain.on("set-window-position", (event, { x, y }) => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.setBounds({ x, y, width: WIN_W, height: WIN_H }, false);
-    }
-  });
-
-  ipcMain.on("toggle-always-on-top", (event, flag) => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.setAlwaysOnTop(flag, "screen-saver");
-    }
-  });
-
-  // ─── 宠物导入与管理 ───────────────────────────────
-
-  ipcMain.handle("import-pet-zip", async () => {
-    if (!mainWindow || mainWindow.isDestroyed()) return null;
-
-    const result = await dialog.showOpenDialog(mainWindow, {
-      title: "导入宠物包",
-      filters: [{ name: "宠物包", extensions: ["zip"] }],
-      properties: ["openFile"],
-    });
-
-    if (result.canceled || result.filePaths.length === 0) return null;
-
-    const zipPath = result.filePaths[0];
-    try {
-      const zip = new AdmZip(zipPath);
-
-      let petJsonEntry = zip.getEntry("pet.json");
-      let entries = zip.getEntries();
-
-      if (!petJsonEntry) {
-        for (const entry of entries) {
-          if (entry.entryName.endsWith("pet.json") && !entry.entryName.startsWith("__MACOSX")) {
-            petJsonEntry = entry;
-            break;
-          }
+  // ─── System idle (no mouse/keyboard anywhere) → renderer dozes / sleeps ──
+  let idleOverride = null;
+  function startIdleMonitor() {
+    setInterval(() => {
+      let seconds;
+      if (idleOverride && Date.now() < idleOverride.until) {
+        seconds = idleOverride.seconds;
+      } else {
+        idleOverride = null;
+        try {
+          seconds = powerMonitor.getSystemIdleTime();
+        } catch (e) {
+          return;
         }
       }
+      sendToRenderer("system-idle", seconds);
+    }, 10000);
+  }
 
-      if (!petJsonEntry) {
-        throw new Error("zip 中未找到 pet.json");
-      }
-
-      const manifest = JSON.parse(petJsonEntry.getData().toString("utf8"));
-      const destDir = path.join(getPetsDir(), manifest.id);
-
-      if (fs.existsSync(destDir)) {
-        fs.rmSync(destDir, { recursive: true, force: true });
-      }
-      fs.mkdirSync(destDir, { recursive: true });
-
-      for (const entry of entries) {
-        if (entry.isDirectory || entry.entryName.startsWith("__MACOSX")) continue;
-        const name = entry.entryName;
-        const slashIdx = name.indexOf("/");
-        const relative = slashIdx >= 0 ? name.substring(slashIdx + 1) : name;
-        if (!relative) continue;
-        const outPath = path.join(destDir, relative);
-        const parent = path.dirname(outPath);
-        fs.mkdirSync(parent, { recursive: true });
-        fs.writeFileSync(outPath, entry.getData());
-      }
-
-      setCurrentPetId(manifest.id);
-      console.log(`[CCPet] 导入宠物: ${manifest.displayName} (${manifest.id})`);
-      return manifest;
+  // ─── Fullscreen watcher (PowerShell helper, prints FS:0/FS:1 on change) ──
+  function startFullscreenWatcher() {
+    if (process.platform !== "win32" || quitting) return;
+    const script = path.join(__dirname, "scripts", "fullscreen-watch.ps1");
+    if (!fs.existsSync(script)) return;
+    let child;
+    try {
+      child = spawn(
+        "powershell.exe",
+        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, "-SelfPid", String(process.pid), "-Interval", "1.5"],
+        { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] },
+      );
     } catch (e) {
-      console.error("[CCPet] 导入宠物失败:", e.message);
-      throw e;
+      console.error("[CCPet] fullscreen watcher failed:", e.message);
+      return;
     }
+    fsWatcher = child;
+    let buf = "";
+    child.stdout.on("data", (chunk) => {
+      buf += chunk.toString();
+      let i;
+      while ((i = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, i).trim();
+        buf = buf.slice(i + 1);
+        if (!line.startsWith("FS:")) continue;
+        const active = line === "FS:1";
+        if (active !== fullscreenActive) {
+          fullscreenActive = active;
+          console.log(`[CCPet] fullscreen app ${active ? "detected" : "gone"}`);
+          sendToRenderer("fullscreen-change", active);
+        }
+      }
+    });
+    child.on("exit", () => {
+      fsWatcher = null;
+      if (!quitting) setTimeout(startFullscreenWatcher, 10000);
+    });
+  }
+
+  function stopFullscreenWatcher() {
+    if (fsWatcher) {
+      try {
+        fsWatcher.kill();
+      } catch (e) {
+        /* ignore */
+      }
+      fsWatcher = null;
+    }
+  }
+
+  // ─── Usage + cost (ccusage, offline pricing) ─────────
+  const CCUSAGE_CLI = path.join(__dirname, "node_modules", "ccusage", "src", "cli.js");
+  const USAGE_TTL_MS = 5 * 60 * 1000;
+  let usageCache = { at: 0, data: null };
+  let usageInFlight = null;
+
+  // Prefer the system node: a console-subsystem exe honours windowsHide, whereas
+  // Electron-as-node allocates a console of its own → the black window flash.
+  let nodeExeCache;
+  function findNodeExe() {
+    if (nodeExeCache !== undefined) return nodeExeCache;
+    nodeExeCache = null;
+    try {
+      const { spawnSync } = require("child_process");
+      const r = spawnSync(process.platform === "win32" ? "where" : "which", ["node"], { windowsHide: true });
+      const first = String(r.stdout || "")
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .find((l) => l && fs.existsSync(l));
+      if (first) nodeExeCache = first;
+    } catch (e) {
+      /* ignore */
+    }
+    return nodeExeCache;
+  }
+
+  function todayYmd() {
+    const d = new Date();
+    return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
+  }
+
+  function runCcusageToday() {
+    return new Promise((resolve, reject) => {
+      if (!fs.existsSync(CCUSAGE_CLI)) {
+        reject(new Error("ccusage not installed"));
+        return;
+      }
+      const ymd = todayYmd();
+      const args = [CCUSAGE_CLI, "daily", "--json", "--offline", "--since", ymd, "--until", ymd];
+      let child;
+      try {
+        const nodeExe = findNodeExe();
+        child = nodeExe
+          ? spawn(nodeExe, args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] })
+          : spawn(process.execPath, args, {
+              // Fallback: Electron's bundled Node (may flash a console briefly)
+              env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+              windowsHide: true,
+              stdio: ["ignore", "pipe", "pipe"],
+            });
+      } catch (e) {
+        reject(e);
+        return;
+      }
+      let out = "";
+      let err = "";
+      const timer = setTimeout(() => {
+        child.kill();
+        reject(new Error("ccusage timed out"));
+      }, 25000);
+      child.stdout.on("data", (c) => (out += c));
+      child.stderr.on("data", (c) => (err += c));
+      child.on("error", (e) => {
+        clearTimeout(timer);
+        reject(e);
+      });
+      child.on("close", () => {
+        clearTimeout(timer);
+        try {
+          const json = JSON.parse(out);
+          const t = json.totals || {};
+          const day = (json.daily && json.daily[0]) || {};
+          resolve({
+            source: "ccusage",
+            totalCost: t.totalCost || 0,
+            inputTokens: t.inputTokens || 0,
+            outputTokens: t.outputTokens || 0,
+            cacheReadTokens: t.cacheReadTokens || 0,
+            cacheCreationTokens: t.cacheCreationTokens || 0,
+            models: day.modelsUsed || [],
+          });
+        } catch (e) {
+          reject(new Error("ccusage parse failed: " + (err || e.message).slice(0, 200)));
+        }
+      });
+    });
+  }
+
+  // Fallback: parse ~/.claude/projects JSONL ourselves (tokens only, no cost)
+  function collectUsageToday() {
+    const projectsDir = path.join(os.homedir(), ".claude", "projects");
+    const sums = { source: "local", totalCost: null, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, models: [] };
+    const dayStart = new Date();
+    dayStart.setHours(0, 0, 0, 0);
+    let dirs;
+    try {
+      dirs = fs.readdirSync(projectsDir, { withFileTypes: true });
+    } catch (e) {
+      return { ...sums, error: "no-projects-dir" };
+    }
+    const seen = new Set();
+    const models = new Set();
+    for (const dir of dirs) {
+      if (!dir.isDirectory()) continue;
+      const dpath = path.join(projectsDir, dir.name);
+      let files;
+      try {
+        files = fs.readdirSync(dpath);
+      } catch (e) {
+        continue;
+      }
+      for (const f of files) {
+        if (!f.endsWith(".jsonl")) continue;
+        const fpath = path.join(dpath, f);
+        let st;
+        try {
+          st = fs.statSync(fpath);
+        } catch (e) {
+          continue;
+        }
+        if (st.mtimeMs < dayStart.getTime() || st.size > 200 * 1024 * 1024) continue;
+        let text;
+        try {
+          text = fs.readFileSync(fpath, "utf8");
+        } catch (e) {
+          continue;
+        }
+        for (const line of text.split("\n")) {
+          if (!line || line.indexOf('"usage"') === -1) continue;
+          let obj;
+          try {
+            obj = JSON.parse(line);
+          } catch (e) {
+            continue;
+          }
+          const msg = obj.message;
+          const usage = msg && msg.usage;
+          if (!usage) continue;
+          if (obj.timestamp) {
+            const t = new Date(obj.timestamp);
+            if (!isNaN(t.getTime()) && t < dayStart) continue;
+          }
+          if (msg.id) {
+            const key = msg.id + ":" + (obj.requestId || "");
+            if (seen.has(key)) continue;
+            seen.add(key);
+          }
+          sums.inputTokens += usage.input_tokens || 0;
+          sums.outputTokens += usage.output_tokens || 0;
+          sums.cacheReadTokens += usage.cache_read_input_tokens || 0;
+          sums.cacheCreationTokens += usage.cache_creation_input_tokens || 0;
+          if (msg.model) models.add(msg.model);
+        }
+      }
+    }
+    sums.models = Array.from(models);
+    return sums;
+  }
+
+  async function refreshUsage() {
+    if (usageInFlight) return usageInFlight;
+    usageInFlight = (async () => {
+      let data;
+      try {
+        data = await runCcusageToday();
+      } catch (e) {
+        console.warn("[CCPet] ccusage unavailable, falling back:", e.message);
+        try {
+          data = collectUsageToday();
+          data.fallbackReason = e.message;
+        } catch (e2) {
+          data = { error: e2.message };
+        }
+      }
+      usageCache = { at: Date.now(), data };
+      usageInFlight = null;
+      return data;
+    })();
+    return usageInFlight;
+  }
+
+  // Clicks are served from the cache (warmed at startup, refreshed in the background)
+  async function getUsage() {
+    if (usageCache.data && Date.now() - usageCache.at < USAGE_TTL_MS) return usageCache.data;
+    if (usageCache.data) {
+      refreshUsage(); // stale: return what we have, refresh quietly
+      return usageCache.data;
+    }
+    return refreshUsage();
+  }
+
+  function startUsagePrefetch() {
+    setTimeout(() => refreshUsage(), 4000);
+    setInterval(() => refreshUsage(), USAGE_TTL_MS);
+  }
+
+  ipcMain.handle("get-usage", () => getUsage());
+
+  // ─── Start with Windows ──────────────────────────────
+  function autoStartSupported() {
+    return app.isPackaged && process.platform === "win32";
+  }
+  function applyAutoStart(enabled) {
+    if (!autoStartSupported()) return false;
+    try {
+      app.setLoginItemSettings({ openAtLogin: !!enabled, path: process.execPath, args: [] });
+      return true;
+    } catch (e) {
+      console.error("[CCPet] setLoginItemSettings failed:", e.message);
+      return false;
+    }
+  }
+  function autoStartEnabled() {
+    if (!autoStartSupported()) return false;
+    try {
+      return !!app.getLoginItemSettings({ path: process.execPath }).openAtLogin;
+    } catch (e) {
+      return false;
+    }
+  }
+  ipcMain.handle("get-autostart", () => ({ supported: autoStartSupported(), enabled: autoStartEnabled() }));
+  ipcMain.handle("set-autostart", (event, enabled) => {
+    const ok = applyAutoStart(enabled);
+    if (ok) saveConfig({ autoStart: !!enabled });
+    return { supported: autoStartSupported(), enabled: autoStartEnabled() };
+  });
+
+  // ─── Tray ────────────────────────────────────────────
+  function createTray() {
+    const iconPath = path.join(__dirname, "assets", "tray.png");
+    if (!fs.existsSync(iconPath)) return;
+    try {
+      tray = new Tray(nativeImage.createFromPath(iconPath));
+    } catch (e) {
+      console.error("[CCPet] tray failed:", e.message);
+      return;
+    }
+    tray.setToolTip("Claw'd — Claude Code pet");
+    const rebuild = () => {
+      const menu = Menu.buildFromTemplate([
+        { label: "📊 Today's usage", click: () => sendToRenderer("tray-command", "usage") },
+        { label: "🚶 Toggle roaming", click: () => sendToRenderer("tray-command", "toggle-roam") },
+        { label: "🫣 Tuck to edge / bring back", click: () => sendToRenderer("tray-command", "toggle-hide") },
+        { type: "separator" },
+        {
+          label: "🚀 Start with Windows",
+          type: "checkbox",
+          enabled: autoStartSupported(),
+          checked: autoStartEnabled(),
+          click: (item) => {
+            applyAutoStart(item.checked);
+            saveConfig({ autoStart: item.checked });
+          },
+        },
+        { type: "separator" },
+        { label: "🔄 Restart", click: () => restartApp() },
+        { label: "🚪 Quit", click: () => quitApp() },
+      ]);
+      tray.setContextMenu(menu);
+    };
+    rebuild();
+    tray.on("click", () => sendToRenderer("tray-command", "usage"));
+    tray.on("right-click", rebuild);
+  }
+
+  function quitApp() {
+    quitting = true;
+    stopFullscreenWatcher();
+    if (httpServer) httpServer.close();
+    if (completedTimer) clearTimeout(completedTimer);
+    if (tray) {
+      tray.destroy();
+      tray = null;
+    }
+    app.quit();
+  }
+
+  function restartApp() {
+    quitting = true;
+    stopFullscreenWatcher();
+    if (httpServer) httpServer.close();
+    if (tray) {
+      tray.destroy();
+      tray = null;
+    }
+    app.relaunch(); // spawns a fresh instance once this one exits (lock is released by then)
+    app.exit(0);
+  }
+
+  // ─── IPC: window control ─────────────────────────────
+  ipcMain.on("set-ignore-mouse", (event, ignore) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.setIgnoreMouseEvents(!!ignore, { forward: true });
+    }
+  });
+  ipcMain.handle("get-window-position", () => {
+    if (mainWindow && !mainWindow.isDestroyed()) return mainWindow.getPosition();
+    return [0, 0];
+  });
+  ipcMain.on("set-window-position", (event, { x, y }) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.setBounds({ x: Math.round(x), y: Math.round(y), width: WIN_W, height: WIN_H }, false);
+    }
+  });
+  ipcMain.on("toggle-always-on-top", (event, flag) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.setAlwaysOnTop(flag, "screen-saver");
+  });
+  ipcMain.handle("get-work-area", () => {
+    let cx = 0;
+    let cy = 0;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      const b = mainWindow.getBounds();
+      cx = b.x + Math.round(b.width / 2);
+      cy = b.y + Math.round(b.height / 2);
+    }
+    return screen.getDisplayNearestPoint({ x: cx, y: cy }).workArea;
+  });
+  ipcMain.on("quit-app", () => quitApp());
+  ipcMain.on("restart-app", () => restartApp());
+
+  // ─── Pet import / management ─────────────────────────
+  ipcMain.handle("import-pet-zip", async () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return null;
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: "Import pet pack",
+      filters: [{ name: "Pet pack", extensions: ["zip"] }],
+      properties: ["openFile"],
+    });
+    if (result.canceled || result.filePaths.length === 0) return null;
+    const zipPath = result.filePaths[0];
+    const zip = new AdmZip(zipPath);
+    let petJsonEntry = zip.getEntry("pet.json");
+    const entries = zip.getEntries();
+    if (!petJsonEntry) {
+      for (const entry of entries) {
+        if (entry.entryName.endsWith("pet.json") && !entry.entryName.startsWith("__MACOSX")) {
+          petJsonEntry = entry;
+          break;
+        }
+      }
+    }
+    if (!petJsonEntry) throw new Error("pet.json not found in zip");
+    const manifest = JSON.parse(petJsonEntry.getData().toString("utf8"));
+    const destDir = path.join(getPetsDir(), manifest.id);
+    if (fs.existsSync(destDir)) fs.rmSync(destDir, { recursive: true, force: true });
+    fs.mkdirSync(destDir, { recursive: true });
+    for (const entry of entries) {
+      if (entry.isDirectory || entry.entryName.startsWith("__MACOSX")) continue;
+      const name = entry.entryName;
+      const slashIdx = name.indexOf("/");
+      const relative = slashIdx >= 0 ? name.substring(slashIdx + 1) : name;
+      if (!relative) continue;
+      const outPath = path.join(destDir, relative);
+      fs.mkdirSync(path.dirname(outPath), { recursive: true });
+      fs.writeFileSync(outPath, entry.getData());
+    }
+    setCurrentPetId(manifest.id);
+    console.log(`[CCPet] imported pet: ${manifest.displayName} (${manifest.id})`);
+    return manifest;
   });
 
   ipcMain.handle("list-pets", () => {
     try {
       const dir = getPetsDir();
-      const entries = fs.readdirSync(dir, { withFileTypes: true });
       const pets = [];
-      for (const entry of entries) {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
         if (!entry.isDirectory()) continue;
         const petJson = path.join(dir, entry.name, "pet.json");
         if (fs.existsSync(petJson)) {
           try {
-            const manifest = JSON.parse(fs.readFileSync(petJson, "utf8"));
-            pets.push(manifest);
+            pets.push(JSON.parse(fs.readFileSync(petJson, "utf8")));
           } catch (e) {
-            console.warn(`[CCPet] 跳过无效宠物: ${entry.name}`);
+            console.warn(`[CCPet] skipping invalid pet: ${entry.name}`);
           }
         }
       }
       return pets;
     } catch (e) {
-      console.error("[CCPet] 列出宠物失败:", e.message);
       return [];
     }
   });
-
   ipcMain.handle("get-pet-dir", (event, petId) => {
     const dir = path.join(getPetsDir(), petId);
-    if (!fs.existsSync(dir)) {
-      throw new Error(`宠物不存在: ${petId}`);
-    }
+    if (!fs.existsSync(dir)) throw new Error(`pet not found: ${petId}`);
     return dir;
   });
+  ipcMain.handle("get-current-pet-id", () => getCurrentPetId());
+  ipcMain.on("set-current-pet-id", (event, petId) => setCurrentPetId(petId));
 
-  ipcMain.handle("get-current-pet-id", () => {
-    return getCurrentPetId();
-  });
-
-  ipcMain.on("set-current-pet-id", (event, petId) => {
-    setCurrentPetId(petId);
-  });
-
-  // ─── 应用生命周期 ────────────────────────────────
-  app.commandLine.appendSwitch('disable-gpu');
+  // ─── App lifecycle ───────────────────────────────────
+  app.commandLine.appendSwitch("disable-gpu");
   app.disableHardwareAcceleration();
+
+  app.on("second-instance", () => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
+  });
 
   app.whenReady().then(() => {
     createWindow();
     startHttpServer();
-    autoConfigHooks();
+    createTray();
+    startFullscreenWatcher();
+    startIdleMonitor();
+    startUsagePrefetch();
+
+    // Start with Windows: default ON for the packaged app, remembered in config
+    if (autoStartSupported()) {
+      const cfg = loadConfig();
+      const want = cfg.autoStart !== false;
+      applyAutoStart(want);
+      if (cfg.autoStart === undefined) saveConfig({ autoStart: want });
+    }
+
+    // Writing ~/.claude/settings.json is a global change — opt-in only (CCPET_AUTOCONFIG=1)
+    if (process.env.CCPET_AUTOCONFIG === "1") {
+      autoConfigHooks();
+    } else {
+      console.log("[CCPet] hooks auto-config skipped (set CCPET_AUTOCONFIG=1 or run scripts/setup-hooks.js)");
+    }
   });
 
   app.on("window-all-closed", () => {
-    if (httpServer) httpServer.close();
-    if (completedTimer) clearTimeout(completedTimer);
-    app.quit();
+    quitApp();
+  });
+
+  app.on("before-quit", () => {
+    quitting = true;
+    stopFullscreenWatcher();
   });
 
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
-    }
+    if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
-} // end startApp
+}

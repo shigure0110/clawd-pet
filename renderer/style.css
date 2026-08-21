@@ -26,7 +26,7 @@ body {
     left: 0;
     top: 0;
     width: 220px;
-    height: 200px;
+    height: 260px; /* extra headroom for multi-line bubbles */
     overflow: hidden;
     pointer-events: none;
     transform-origin: top left;
@@ -53,7 +53,8 @@ body {
     overflow: hidden;
     background-repeat: no-repeat;
     background-image: url("spritesheet.webp");
-    filter: url(#remove-fringe);
+    /* 像素画直接硬边渲染; remove-fringe 滤镜是给照片抠图用的, 会啃掉描边 */
+    image-rendering: pixelated;
     pointer-events: none;
 }
 
@@ -83,13 +84,13 @@ body {
 #pet-speech-bubble {
     position: absolute;
     left: 50%;
-    top: 12px;
-    transform: translateX(-50%) translateY(-6px);
+    bottom: 122px; /* anchored just above the crab, grows upward with its text */
+    transform: translateX(-50%) translateY(6px);
     width: max-content;
-    max-width: 200px;
-    max-height: 64px;
+    max-width: 208px;
+    max-height: 132px;
     overflow: hidden;
-    padding: 5px 9px 7px;
+    padding: 6px 10px 8px;
 
     background: #fff;
     color: #1a1a2e;
@@ -177,6 +178,32 @@ body {
         opacity: 1;
         transform: translateY(-4px);
     }
+}
+
+/* ─── Session badge (≥ 2 concurrent Claude Code sessions) ── */
+#session-badge {
+    position: absolute;
+    left: 50%;
+    bottom: 106px;
+    transform: translateX(30px);
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 9px;
+    background: #1a1a2e;
+    color: #fff;
+    font-family: "Segoe UI", system-ui, sans-serif;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 18px;
+    text-align: center;
+    box-shadow: 1px 1px 0 #fff;
+    display: none;
+    pointer-events: none;
+    z-index: 10002;
+}
+#session-badge.show {
+    display: block;
 }
 
 /* ─── 粒子 ─────────────────────────────────────── */
@@ -292,7 +319,25 @@ body {
     }
 }
 
-/* body.drag-active 备用（当前无 transition 所以也无需这条，保留供扩展）*/
+/* ─── Wall climbing ─────────────────────────────── */
+/* Rotate the sprite so its feet face the wall, and shift the container so the
+   feet touch the window edge (window itself sits flush against the screen edge). */
+#pet-container.climb-right {
+    transform: translateX(calc(-50% + 55px)) scale(0.55);
+}
+#pet-container.climb-right #pet-sprite {
+    transform: rotate(-90deg);
+    transform-origin: 50% 50%;
+}
+#pet-container.climb-left {
+    transform: translateX(calc(-50% - 55px)) scale(0.55);
+}
+#pet-container.climb-left #pet-sprite {
+    transform: rotate(90deg);
+    transform-origin: 50% 50%;
+}
+
+/* body.drag-active spare hook (no transition currently, kept for extension) */
 body.drag-active #pet-container {
     transition: none;
 }

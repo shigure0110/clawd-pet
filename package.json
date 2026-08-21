@@ -6,7 +6,9 @@
   "scripts": {
     "start": "electron .",
     "notify": "node hooks/notify.js",
-    "build": "electron-packager . CCPet --platform=win32 --arch=x64 --out=dist --overwrite"
+    "build": "electron-packager . Clawd --platform=win32 --arch=x64 --out=dist --overwrite --icon=assets/icon.ico --ignore=\"^/dist\" --ignore=\"^/assets/make_.*\\.py$\" --ignore=\"^/renderer/spritesheet1\\.webp$\"",
+    "hooks:install": "node scripts/setup-hooks.js install",
+    "hooks:uninstall": "node scripts/setup-hooks.js uninstall"
   },
   "keywords": [
     "claude-code",
@@ -20,6 +22,7 @@
     "electron-packager": "^17.1.2"
   },
   "dependencies": {
-    "adm-zip": "^0.5.17"
+    "adm-zip": "^0.5.17",
+    "ccusage": "^20.0.20"
   }
 }

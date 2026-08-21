@@ -78,6 +78,9 @@ setTimeout(() => {
   processEvent();
 }, 2000);
 
+let CUR_PAYLOAD = {};
+let CUR_EVENT = "";
+
 function processEvent() {
   const argv2 = process.argv[2] || "";
 
@@ -85,6 +88,8 @@ function processEvent() {
   try {
     payload = JSON.parse(inputData);
   } catch (e) {}
+  CUR_PAYLOAD = payload;
+  CUR_EVENT = argv2 || payload.hook_event_name || "";
 
   // 旧格式兼容
   if (LEGACY_STATUS.has(argv2)) {
@@ -112,7 +117,14 @@ function processEvent() {
       sendStatus("running", "");
       return;
     }
-    sendStatus("completed", "");
+    // 带上项目名, 提醒哪个话题可以推进了
+    let proj = "";
+    const cwd = payload.cwd || payload.workspace_dir || "";
+    if (typeof cwd === "string" && cwd) {
+      const parts = cwd.split(/[\\/]/).filter(Boolean);
+      proj = parts[parts.length - 1] || "";
+    }
+    sendStatus("completed", proj ? `「${truncate(proj, 24)}」可以推进了` : "");
     return;
   }
 
@@ -145,7 +157,14 @@ function processEvent() {
 }
 
 function sendStatus(status, message) {
-  const data = JSON.stringify({ status, message });
+  // session id + cwd let the pet count concurrent sessions and tag bubbles by project
+  const data = JSON.stringify({
+    status,
+    message,
+    sessionId: CUR_PAYLOAD.session_id || "",
+    cwd: CUR_PAYLOAD.cwd || "",
+    event: CUR_EVENT,
+  });
 
   const req = http.request(
     {

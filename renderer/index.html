@@ -1,5 +1,5 @@
-﻿<!doctype html>
-<html lang="zh-CN">
+<!doctype html>
+<html lang="en">
     <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -8,63 +8,22 @@
         <link rel="stylesheet" href="style.css" />
     </head>
     <body>
-        <!-- SVG 滤镜：去除精灵图边缘锯齿 -->
-        <svg width="0" height="0" style="position: absolute">
-            <filter id="remove-fringe" color-interpolation-filters="sRGB">
-                <feColorMatrix
-                    in="SourceGraphic"
-                    type="matrix"
-                    values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0"
-                    result="original-alpha"
-                />
-                <feMorphology
-                    in="original-alpha"
-                    operator="erode"
-                    radius="1.5"
-                    result="eroded-alpha"
-                />
-                <feGaussianBlur
-                    in="eroded-alpha"
-                    stdDeviation="0.5"
-                    result="blurred-alpha"
-                />
-                <feColorMatrix
-                    in="blurred-alpha"
-                    type="matrix"
-                    values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 10 -5"
-                    result="final-alpha"
-                />
-                <feComposite
-                    in="SourceGraphic"
-                    in2="final-alpha"
-                    operator="in"
-                />
-            </filter>
-        </svg>
-
-        <!-- 固定舞台：气泡和宠物始终在同一个 220×200 区域内，窗口异常变大也不会把它们拉开 -->
+        <!-- Fixed stage: bubble + pet always live inside this 220x260 box -->
         <div id="pet-stage">
-            <!-- 对话气泡 -->
+            <!-- Speech bubble -->
             <div id="pet-speech-bubble"><span class="bubble-text"></span></div>
 
-            <!-- 宠物容器 -->
+            <!-- Concurrent session count (shown when ≥ 2) -->
+            <div id="session-badge"></div>
+
+            <!-- Pet container -->
             <div id="pet-container">
                 <div id="pet-sprite"></div>
                 <div id="pet-hitbox"></div>
             </div>
         </div>
 
-        <!-- 右键菜单 -->
-        <div id="context-menu" style="display: none">
-            <div class="menu-item" data-action="wave">👋 打招呼</div>
-            <div class="menu-item" data-action="jump">⬆️ 跳跃</div>
-            <div class="menu-item" data-action="think">🤔 思考</div>
-            <div class="menu-separator"></div>
-            <div class="menu-item" data-action="import-pet">📥 导入宠物</div>
-            <div class="menu-item" data-action="toggle-top">📌 窗口置顶</div>
-            <div class="menu-separator"></div>
-            <div class="menu-item menu-item-danger" data-action="quit">🚪 退出</div>
-        </div>
+        <!-- Context menu is native (Electron Menu.popup) — see main.js "show-menu" -->
 
         <script src="pet.js"></script>
     </body>
