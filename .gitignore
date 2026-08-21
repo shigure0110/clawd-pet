@@ -5,3 +5,5 @@ out/
 *.log
 .idea/
 .playwright-mcp/
+
+renderer/spritesheet1.webp

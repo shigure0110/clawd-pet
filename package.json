@@ -1,21 +1,22 @@
 {
-  "name": "ccpet",
-  "version": "2.0.0",
-  "description": "Claude Code 桌面宠物 - 带状态感知的互动桌宠",
+  "name": "clawd-pet",
+  "version": "3.0.0",
+  "description": "A pixel crab desktop pet that watches your Claude Code sessions",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
     "notify": "node hooks/notify.js",
-    "build": "electron-packager . Clawd --platform=win32 --arch=x64 --out=dist --overwrite --icon=assets/icon.ico --ignore=\"^/dist\" --ignore=\"^/assets/make_.*\\.py$\" --ignore=\"^/renderer/spritesheet1\\.webp$\"",
+    "build": "electron-packager . Clawd --platform=win32 --arch=x64 --out=dist --overwrite --icon=assets/icon.ico --ignore=\"^/dist\" --ignore=\"^/assets/make_.*\\.py$\"",
     "hooks:install": "node scripts/setup-hooks.js install",
     "hooks:uninstall": "node scripts/setup-hooks.js uninstall"
   },
   "keywords": [
     "claude-code",
     "desktop-pet",
+    "pixel-art",
     "electron"
   ],
-  "author": "CCPet",
+  "author": "shigure0110",
   "license": "MIT",
   "devDependencies": {
     "electron": "^35.0.0",
