@@ -314,7 +314,7 @@ function startApp() {
     const template = [
       { label: "📊 Today's usage", click: () => menuAction("usage") },
       { label: `🚶 Roam: ${s.roam ? "On" : "Off"}`, click: () => menuAction("toggle-roam") },
-      { label: s.hidden ? "👋 Come back" : "🫣 Tuck to edge", click: () => menuAction("toggle-hide") },
+      { label: s.hidden ? "👋 Bring back from edge" : "🙈 Hide at screen edge", click: () => menuAction("toggle-hide") },
       {
         label: "🚀 Start with Windows",
         type: "checkbox",
@@ -794,7 +794,7 @@ function startApp() {
       const menu = Menu.buildFromTemplate([
         { label: "📊 Today's usage", click: () => sendToRenderer("tray-command", "usage") },
         { label: "🚶 Toggle roaming", click: () => sendToRenderer("tray-command", "toggle-roam") },
-        { label: "🫣 Tuck to edge / bring back", click: () => sendToRenderer("tray-command", "toggle-hide") },
+        { label: "🙈 Hide at screen edge / bring back", click: () => sendToRenderer("tray-command", "toggle-hide") },
         { type: "separator" },
         {
           label: "🚀 Start with Windows",

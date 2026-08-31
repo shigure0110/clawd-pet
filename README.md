@@ -70,7 +70,9 @@ Requires Node.js 18+. Windows only for now — the fullscreen watcher and start-
 - **Left click** — today's usage and cost
 - **Drag** — move it; drop it in mid-air and it falls
 - **Hover** — petting
-- **Right click / tray icon** — usage, roaming, tuck to edge, tricks, start-with-Windows, restart, quit
+- **Right click / tray icon** — usage, roaming, hide at screen edge, tricks, start-with-Windows, restart, quit
+
+"Hide at screen edge" parks the crab half off the right edge and makes it click-through, so it is visible but never in the way — the same thing it does by itself when a fullscreen app is in front.
 
 ## Sprite art
 
