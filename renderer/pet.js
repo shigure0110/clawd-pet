@@ -86,6 +86,18 @@ const COFFEE_EVERY_MS = 25 * 60 * 1000; // sip while Claude runs long
 const LONG_RUN_MS = 30 * 60 * 1000; // stretch after a long run
 const SIT_REMIND_MS = 50 * 60 * 1000; // you've been active this long → stretch break
 const BREAK_IDLE_S = 300; // 5 min of no input counts as a break
+const DBLCLICK_MS = 280; // second click within this window = double click
+const HIDE_PEEK_PX = 36; // when hiding at the edge, this much of the crab slides off-screen
+const HIDE_CLIMB_PX = 120; // and it clings this far up the wall
+
+function openClaude(engine) {
+  engine.applyState("waving");
+  showSpeech("Opening Claude 💬", 1500);
+  if (window.ccPet && window.ccPet.openClaude) window.ccPet.openClaude();
+  setTimeout(() => {
+    if (engine.currentState === "waving") engine.applyState(stateForStatus());
+  }, 1600);
+}
 
 // ── PetEngine ──────────────────────────────────────────────
 
@@ -433,6 +445,7 @@ function fallToGround(groundY) {
 }
 
 function cancelStroll(revertToIdle = true) {
+  if (hiddenMode) return; // clinging to the edge is not a stroll — never interrupt it
   if (strollTimer) {
     clearTimeout(strollTimer);
     strollTimer = null;
@@ -570,19 +583,35 @@ async function settleAfterDrag() {
 }
 
 // Tuck half off the right edge and become click-through (fullscreen apps / manual)
+// Hide at the right edge: walk over, climb the wall a little, then slide the lower
+// half of the body past the screen edge so only the head peeks in (click-through).
 async function enterHide() {
   if (hiddenMode) return;
-  hiddenMode = true;
-  showSpeech("", 0);
-  cancelStroll(false);
   const wa = await workArea();
   if (!wa) return;
+  const wasClimbing = !!climbSide;
+  cancelStroll(false); // still allowed to drop us here: hiddenMode isn't set yet
+  hiddenMode = true;
+  showSpeech("", 0);
   const groundY = groundYOf(wa);
-  const targetX = wa.x + wa.width - WIN_W / 2 - 6;
-  engineRef.applyState(targetX > windowPosX ? "running-right" : "running-left");
-  await moveWindow(targetX, groundY, 3);
-  engineRef.applyState(stateForStatus());
-  if (hiddenMode) window.ccPet.setIgnoreMouse(true);
+  const edgeX = wa.x + wa.width - WIN_W; // window flush with the right edge
+  if (wasClimbing && windowPosY < groundY - 4) await fallToGround(groundY);
+  if (!hiddenMode) return;
+
+  engineRef.applyState(edgeX > windowPosX ? "running-right" : "running-left");
+  await moveWindow(edgeX, groundY, 3);
+  if (!hiddenMode) return;
+
+  const c = document.getElementById("pet-container");
+  climbSide = "right";
+  if (c) c.classList.add("climb-right");
+  engineRef.applyState("running-right");
+  await moveWindow(edgeX, groundY - HIDE_CLIMB_PX, 2); // up the wall
+  if (!hiddenMode) return;
+  await moveWindow(edgeX + HIDE_PEEK_PX, groundY - HIDE_CLIMB_PX, 1.5); // lower half off-screen
+  if (!hiddenMode) return;
+  engineRef.applyState(stateForStatus()); // gaming pose while idle
+  window.ccPet.setIgnoreMouse(true);
 }
 
 async function exitHide() {
@@ -592,8 +621,15 @@ async function exitHide() {
   const wa = await workArea();
   if (!wa) return;
   const groundY = groundYOf(wa);
+  const edgeX = wa.x + wa.width - WIN_W;
+  if (climbSide) {
+    engineRef.applyState("running-left");
+    await moveWindow(edgeX, windowPosY, 1.5); // slide back onto the screen
+    await moveWindow(edgeX, groundY, 2.6); // climb down
+    clearClimb();
+  }
   engineRef.applyState("running-left");
-  await moveWindow(wa.x + wa.width - WIN_W - 10, groundY, 3);
+  await moveWindow(edgeX - 10, groundY, 3);
   engineRef.applyState(stateForStatus());
   scheduleStroll();
 }
@@ -677,11 +713,24 @@ function setupDrag(engine) {
   });
 
   // Click → particles + today's usage
+  // Single click → today's usage; double click → bring the Claude app to the front.
+  // The first click is held for DBLCLICK_MS so a second one can cancel it.
+  let clickTimer = null;
   hitbox.addEventListener("click", (e) => {
     if (e.button !== 0 || isDragging) return;
-    cancelStroll();
     spawnParticles(e.clientX, e.clientY);
-    showUsage(engine);
+    if (clickTimer) {
+      clearTimeout(clickTimer);
+      clickTimer = null;
+      cancelStroll();
+      openClaude(engine);
+      return;
+    }
+    clickTimer = setTimeout(() => {
+      clickTimer = null;
+      cancelStroll();
+      showUsage(engine);
+    }, DBLCLICK_MS);
   });
 
   // Hover 1.2s → petting (happy face, hearts)
@@ -840,6 +889,9 @@ async function runMenuAction(engine, action) {
       isAlwaysOnTop = !isAlwaysOnTop;
       window.ccPet.toggleAlwaysOnTop(isAlwaysOnTop);
       showSpeech(isAlwaysOnTop ? "Pinned on top" : "Unpinned", 1500);
+      break;
+    case "open-claude":
+      openClaude(engine);
       break;
     case "restart":
       cancelStroll(false);

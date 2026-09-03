@@ -312,6 +312,7 @@ function startApp() {
     if (!mainWindow || mainWindow.isDestroyed()) return;
     const s = state || {};
     const template = [
+      { label: "💬 Open Claude", click: () => menuAction("open-claude") },
       { label: "📊 Today's usage", click: () => menuAction("usage") },
       { label: `🚶 Roam: ${s.roam ? "On" : "Off"}`, click: () => menuAction("toggle-roam") },
       { label: s.hidden ? "👋 Bring back from edge" : "🙈 Hide at screen edge", click: () => menuAction("toggle-hide") },
@@ -792,6 +793,7 @@ function startApp() {
     tray.setToolTip("Claw'd — Claude Code pet");
     const rebuild = () => {
       const menu = Menu.buildFromTemplate([
+        { label: "💬 Open Claude", click: () => openClaudeApp() },
         { label: "📊 Today's usage", click: () => sendToRenderer("tray-command", "usage") },
         { label: "🚶 Toggle roaming", click: () => sendToRenderer("tray-command", "toggle-roam") },
         { label: "🙈 Hide at screen edge / bring back", click: () => sendToRenderer("tray-command", "toggle-hide") },
@@ -871,6 +873,22 @@ function startApp() {
   });
   ipcMain.on("quit-app", () => quitApp());
   ipcMain.on("restart-app", () => restartApp());
+
+  // ─── Open / focus the Claude desktop app ─────────────
+  function openClaudeApp() {
+    const script = path.join(__dirname, "scripts", "focus-claude.ps1");
+    if (process.platform !== "win32" || !fs.existsSync(script)) return;
+    try {
+      spawn(
+        "powershell.exe",
+        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script],
+        { windowsHide: true, stdio: "ignore" },
+      );
+    } catch (e) {
+      console.error("[CCPet] open Claude failed:", e.message);
+    }
+  }
+  ipcMain.on("open-claude", () => openClaudeApp());
 
   // ─── Pet import / management ─────────────────────────
   ipcMain.handle("import-pet-zip", async () => {

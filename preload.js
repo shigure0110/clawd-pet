@@ -64,6 +64,9 @@ contextBridge.exposeInMainWorld('ccPet', {
   getCurrentPetId: () => ipcRenderer.invoke('get-current-pet-id'),
   setCurrentPetId: (petId) => ipcRenderer.send('set-current-pet-id', petId),
 
+  // Bring the Claude desktop app to the front (launch it if needed)
+  openClaude: () => ipcRenderer.send('open-claude'),
+
   quit: () => ipcRenderer.send('quit-app'),
   restart: () => ipcRenderer.send('restart-app'),
 });
