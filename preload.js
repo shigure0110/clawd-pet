@@ -67,6 +67,18 @@ contextBridge.exposeInMainWorld('ccPet', {
   // Bring the Claude desktop app to the front (launch it if needed)
   openClaude: () => ipcRenderer.send('open-claude'),
 
+  // Window geometry (DIP): { fg: {x,y,w,h,title,cls,hwnd,maximized,fullscreen}|null, claude: {...}|null }
+  onWindowsUpdate: (callback) => {
+    ipcRenderer.on('windows-update', (_event, data) => callback(data));
+  },
+  getWindows: () => ipcRenderer.invoke('get-windows'),
+
+  // Mischief: muddy footprints (absolute DIP coords) and cursor stealing
+  footprint: (fp) => ipcRenderer.send('footprint', fp),
+  clearFootprints: () => ipcRenderer.send('trail-clear'),
+  getCursor: () => ipcRenderer.invoke('get-cursor'),
+  setCursor: (x, y) => ipcRenderer.send('set-cursor', { x, y }),
+
   quit: () => ipcRenderer.send('quit-app'),
   restart: () => ipcRenderer.send('restart-app'),
 });

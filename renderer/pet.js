@@ -89,6 +89,23 @@ const BREAK_IDLE_S = 300; // 5 min of no input counts as a break
 const DBLCLICK_MS = 280; // second click within this window = double click
 const HIDE_PEEK_PX = 36; // when hiding at the edge, this much of the crab slides off-screen
 const HIDE_CLIMB_PX = 120; // and it clings this far up the wall
+const FEET_OFFSET = 11; // crab feet sit this far above the window bottom (208*0.55 cell, 5/52 margin)
+const FLING_MIN_SPEED = 550; // px/s of mouse motion at release → thrown instead of dropped
+const STEAL_COOLDOWN_MS = 20 * 60 * 1000; // auto cursor-steal at most this often
+const STEAL_REACH_PX = 170; // cursor must be within this height above the ground line
+const PERCH_MIN_TOP = 140; // a window needs this much room above it to stand on
+
+// ── Mischief state ──
+let mischiefEnabled = true;
+let muddyStroll = false; // this stroll leaves footprints
+let muddyUntil = 0; // …and for a while after tumbling / stealing
+let footprintAcc = 0;
+let footprintTone = 0;
+let windowsInfo = { fg: null, claude: null };
+let perched = null; // { hwnd, source: "claude"|"fg", win, until }
+let stealing = false;
+let lastStealAt = 0;
+let dragSamples = [];
 
 function openClaude(engine) {
   engine.applyState("waving");
@@ -401,8 +418,352 @@ function moveWindow(targetX, targetY, speed) {
         return;
       }
       setPos(windowPosX + (dx / dist) * speed, windowPosY + (dy / dist) * speed);
+      trackFootprints((dx / dist) * speed);
     }, 33);
   });
+}
+
+// ── Muddy footprints while walking on the ground ──────────
+
+function isMuddy() {
+  return mischiefEnabled && (muddyStroll || Date.now() < muddyUntil);
+}
+
+function trackFootprints(stepX) {
+  if (!isMuddy() || hiddenMode || climbSide || perched || !lastWorkArea) return;
+  if (Math.abs(windowPosY - groundYOf(lastWorkArea)) > 3) return; // only on the floor
+  footprintAcc += Math.abs(stepX);
+  if (footprintAcc < 26) return;
+  footprintAcc = 0;
+  footprintTone = 1 - footprintTone;
+  const dir = stepX >= 0 ? 1 : -1;
+  const footX = windowPosX + WIN_W / 2 - dir * 10 + (footprintTone ? 14 : -14);
+  const footY = windowPosY + WIN_H - FEET_OFFSET;
+  if (window.ccPet && window.ccPet.footprint) window.ccPet.footprint({ x: footX, y: footY, dir, tone: footprintTone });
+}
+
+// ── Throw physics: fling, bounce off the edges, tumble, land dizzy ──
+
+function fling(vx, vy) {
+  return new Promise(async (resolve) => {
+    const wa = await workArea();
+    if (!wa) {
+      resolve(false);
+      return;
+    }
+    const groundY = groundYOf(wa);
+    const minX = wa.x;
+    const maxX = wa.x + wa.width - WIN_W;
+    const minY = wa.y;
+    stopMovement();
+    clearClimb();
+    perched = null;
+    muddyUntil = Date.now() + 60000; // tumbling gets you dirty
+    engineRef.applyState("backflip");
+    showSpeech("Wheee!", 900);
+
+    let x = windowPosX;
+    let y = windowPosY;
+    const cap = 42; // px per frame
+    let vX = Math.max(-cap, Math.min(cap, vx / 60));
+    let vY = Math.max(-cap, Math.min(cap, vy / 60));
+    const g = 0.9;
+    let bounces = 0;
+    moveResolve = resolve;
+    moveTimer = setInterval(() => {
+      if (isDragging) {
+        stopMovement();
+        return;
+      }
+      vY += g;
+      x += vX;
+      y += vY;
+      if (x < minX) {
+        x = minX;
+        vX = -vX * 0.65;
+      } else if (x > maxX) {
+        x = maxX;
+        vX = -vX * 0.65;
+      }
+      if (y < minY) {
+        y = minY;
+        vY = -vY * 0.5;
+      }
+      if (y >= groundY) {
+        y = groundY;
+        if (Math.abs(vY) > 3.5 && bounces < 3) {
+          vY = -vY * 0.45;
+          vX *= 0.75;
+          bounces++;
+        } else {
+          vY = 0;
+          vX *= 0.9; // roll to a stop
+          if (Math.abs(vX) < 0.35) {
+            setPos(x, y);
+            clearInterval(moveTimer);
+            moveTimer = null;
+            moveResolve = null;
+            landDizzy();
+            resolve(true);
+            return;
+          }
+        }
+      }
+      setPos(x, y);
+      if (y === groundY) trackFootprints(vX);
+    }, 16);
+  });
+}
+
+function landDizzy() {
+  engineRef.applyState("failed");
+  showSpeech("Whoa… 😵", 1800);
+  setTimeout(() => {
+    if (engineRef.currentState === "failed") engineRef.applyState(stateForStatus());
+    scheduleStroll();
+  }, 1800);
+}
+
+// ── Perching on a window's title bar ────────────────────────
+
+function pickPerchTarget(wa) {
+  const groundY = groundYOf(wa);
+  const cands = [];
+  if (windowsInfo.claude) cands.push({ win: windowsInfo.claude, source: "claude" });
+  if (windowsInfo.fg && !windowsInfo.fg.fullscreen) cands.push({ win: windowsInfo.fg, source: "fg" });
+  for (const c of cands) {
+    const w = c.win;
+    if (!w || w.w < 360 || w.h < 160) continue;
+    if (w.y < wa.y + PERCH_MIN_TOP) continue; // no room to stand on top
+    if (w.y > groundY) continue; // top edge below the floor line — nothing to climb
+    if (w.x + w.w < wa.x + 80 || w.x > wa.x + wa.width - 80) continue;
+    return c;
+  }
+  return null;
+}
+
+function perchTopY(win) {
+  return win.y + FEET_OFFSET - WIN_H; // feet exactly on the top edge
+}
+
+async function perchOn(target, wa) {
+  const w = target.win;
+  const groundY = groundYOf(wa);
+  const minX = wa.x;
+  const maxX = wa.x + wa.width - WIN_W;
+  // Climb the side that is nearer, if the pet window fits beside it
+  const leftSideX = w.x - WIN_W;
+  const rightSideX = w.x + w.w;
+  const leftOk = leftSideX >= minX - WIN_W / 2;
+  const rightOk = rightSideX <= maxX + WIN_W / 2;
+  let side;
+  if (leftOk && rightOk) side = Math.abs(leftSideX - windowPosX) <= Math.abs(rightSideX - windowPosX) ? "left" : "right";
+  else if (leftOk) side = "left";
+  else if (rightOk) side = "right";
+  else return false;
+  const sideX = Math.round(Math.min(maxX, Math.max(minX, side === "left" ? leftSideX : rightSideX)));
+
+  engineRef.applyState(sideX > windowPosX ? "running-right" : "running-left");
+  if (!(await moveWindow(sideX, groundY, 2.6))) return false;
+
+  // Cling to the window's side and climb to its top corner
+  const c = document.getElementById("pet-container");
+  climbSide = side === "left" ? "right" : "left"; // feet face the window
+  if (c) c.classList.add(climbSide === "right" ? "climb-right" : "climb-left");
+  engineRef.applyState("running-right");
+  const cornerY = w.y - WIN_H + 90;
+  if (!(await moveWindow(sideX, Math.max(wa.y, cornerY), 2.2))) return false;
+
+  // Hop onto the top edge
+  clearClimb();
+  engineRef.applyState("jumping");
+  const standX = Math.round(Math.min(maxX, Math.max(minX, side === "left" ? w.x + 24 : w.x + w.w - WIN_W - 24)));
+  if (!(await moveWindow(standX, perchTopY(w), 7))) return false;
+  perched = { hwnd: w.hwnd, source: target.source, win: w, until: Date.now() + 20000 + Math.random() * 40000 };
+  engineRef.applyState(stateForStatus());
+  showSpeech(target.source === "claude" ? "Nice view from up here 🦀" : "Mind if I sit here?", 2500);
+  schedulePerchTick();
+  return true;
+}
+
+let perchTimer = null;
+function schedulePerchTick() {
+  if (perchTimer) clearTimeout(perchTimer);
+  perchTimer = setTimeout(perchTick, 4000 + Math.random() * 6000);
+}
+
+async function perchTick() {
+  perchTimer = null;
+  if (!perched) return;
+  if (isDragging || menuOpen || hiddenMode) {
+    schedulePerchTick();
+    return;
+  }
+  if (Date.now() > perched.until) {
+    await leavePerch();
+    return;
+  }
+  // Shuffle along the title bar while idle
+  if (currentCCStatus === "idle" && !moveTimer && Math.random() < 0.5) {
+    const w = perched.win;
+    const lo = w.x + 10;
+    const hi = w.x + w.w - WIN_W - 10;
+    if (hi > lo) {
+      const tx = Math.round(lo + Math.random() * (hi - lo));
+      engineRef.applyState(tx > windowPosX ? "running-right" : "running-left");
+      await moveWindow(tx, perchTopY(w), 1.8);
+      if (perched) engineRef.applyState(stateForStatus());
+    }
+  }
+  schedulePerchTick();
+}
+
+async function leavePerch() {
+  if (!perched) return;
+  perched = null;
+  if (perchTimer) {
+    clearTimeout(perchTimer);
+    perchTimer = null;
+  }
+  const wa = lastWorkArea || (await workArea());
+  if (wa && windowPosY < groundYOf(wa) - 4) await fallToGround(groundYOf(wa));
+  scheduleStroll();
+}
+
+function leavePerchSilently() {
+  perched = null;
+  if (perchTimer) {
+    clearTimeout(perchTimer);
+    perchTimer = null;
+  }
+}
+
+// Keep riding the window if it moves; bail out if it vanishes or loses focus
+function handleWindowsUpdate(data) {
+  windowsInfo = data || { fg: null, claude: null };
+  if (!perched) return;
+  let w = null;
+  if (windowsInfo.claude && windowsInfo.claude.hwnd === perched.hwnd) w = windowsInfo.claude;
+  else if (windowsInfo.fg && windowsInfo.fg.hwnd === perched.hwnd) w = windowsInfo.fg;
+  if (!w) {
+    if (perched.source === "claude" || Date.now() - (perched.lastSeen || Date.now()) > 3000) leavePerch();
+    else perched.lastSeen = perched.lastSeen || Date.now();
+    return;
+  }
+  perched.lastSeen = Date.now();
+  const moved = Math.abs(w.y - perched.win.y) > 2 || Math.abs(w.x - perched.win.x) > 2 || Math.abs(w.w - perched.win.w) > 2;
+  perched.win = w;
+  if (moved && !isDragging && !moveTimer) {
+    const nx = Math.round(Math.min(w.x + w.w - WIN_W - 10, Math.max(w.x + 10, windowPosX)));
+    moveWindow(nx, perchTopY(w), 9).then(() => {
+      if (perched) engineRef.applyState(stateForStatus());
+    });
+  }
+}
+
+// ── Stealing the cursor ─────────────────────────────────────
+
+async function stealCursor(manual = false) {
+  if (stealing || hiddenMode || isDragging || sleepStage) return false;
+  const wa = await workArea();
+  if (!wa) return false;
+  let cur;
+  try {
+    cur = await window.ccPet.getCursor();
+  } catch (e) {
+    return false;
+  }
+  const groundY = groundYOf(wa);
+  const clawY = groundY + WIN_H - FEET_OFFSET - 62; // roughly where a raised claw is
+  const reachable = cur.y > clawY - STEAL_REACH_PX && cur.y < groundY + WIN_H && cur.x >= wa.x && cur.x <= wa.x + wa.width;
+  if (!reachable) {
+    if (manual) showSpeech("Can't reach it up there 🦀", 2200);
+    return false;
+  }
+  stealing = true;
+  lastStealAt = Date.now();
+  perched = null;
+  cancelStroll(false);
+  clearClimb();
+  try {
+    if (windowPosY < groundY - 4) await fallToGround(groundY);
+    const minX = wa.x;
+    const maxX = wa.x + wa.width - WIN_W;
+    const underX = Math.round(Math.min(maxX, Math.max(minX, cur.x - WIN_W / 2 - 12)));
+    engineRef.applyState(underX > windowPosX ? "running-right" : "running-left");
+    if (!(await moveWindow(underX, groundY, 3.2))) return false;
+
+    // Grab it
+    engineRef.applyState("waving");
+    showSpeech("Mine now 🦀", 1400);
+    window.ccPet.setCursor(windowPosX + WIN_W / 2 + 12, clawY);
+    if (!(await rest(700))) return false;
+
+    // Run off with it, dropping muddy prints
+    muddyUntil = Date.now() + 15000;
+    const dir = windowPosX - minX > maxX - windowPosX ? -1 : 1;
+    const dist = 180 + Math.random() * 180;
+    const tx = Math.round(Math.min(maxX, Math.max(minX, windowPosX + dir * dist)));
+    engineRef.applyState(dir > 0 ? "running-right" : "running-left");
+    let lastSet = null;
+    let tick = 0;
+    const ok = await new Promise((resolve) => {
+      stopMovement();
+      moveResolve = resolve;
+      moveTimer = setInterval(async () => {
+        if (isDragging || menuOpen) {
+          stopMovement();
+          return;
+        }
+        const step = 2.6 * dir;
+        const nx = dir > 0 ? Math.min(tx, windowPosX + step) : Math.max(tx, windowPosX + step);
+        setPos(nx, groundY);
+        trackFootprints(step);
+        const cx = nx + WIN_W / 2 + 12;
+        // Did the user grab the mouse back? Then let go immediately.
+        if (lastSet && tick % 4 === 0) {
+          try {
+            const now = await window.ccPet.getCursor();
+            if (Math.abs(now.x - lastSet.x) > 8 || Math.abs(now.y - lastSet.y) > 8) {
+              stopMovement();
+              return;
+            }
+          } catch (e) {
+            /* ignore */
+          }
+        }
+        lastSet = { x: Math.round(cx), y: Math.round(clawY) };
+        window.ccPet.setCursor(cx, clawY);
+        tick++;
+        if (nx === tx) {
+          clearInterval(moveTimer);
+          moveTimer = null;
+          moveResolve = null;
+          resolve(true);
+        }
+      }, 33);
+    });
+    engineRef.applyState(ok ? "backflip" : "waiting");
+    showSpeech(ok ? "Hehe 😈" : "Okay, okay, take it back", 1600);
+    await rest(1100);
+    return ok;
+  } finally {
+    stealing = false;
+    if (engineRef && (engineRef.currentState === "backflip" || engineRef.currentState === "waiting")) {
+      engineRef.applyState(stateForStatus());
+    }
+    scheduleStroll();
+  }
+}
+
+function maybeStealCursor(engine, idleSeconds) {
+  if (!mischiefEnabled || stealing || hiddenMode || sleepStage || currentCCStatus !== "idle") return;
+  if (idleSeconds < 25 || idleSeconds > 120) return; // a short pause, not a full walk-away
+  if (Date.now() - lastStealAt < STEAL_COOLDOWN_MS) return;
+  if (moveTimer || climbSide || perched) return;
+  if (Math.random() < 0.6) return; // don't do it at every opportunity
+  lastStealAt = Date.now();
+  stealCursor(false);
 }
 
 function rest(ms) {
@@ -463,8 +824,14 @@ function cancelStroll(revertToIdle = true) {
   }
 }
 
+function isMuddyRoll() {
+  return mischiefEnabled && Math.random() < 0.35;
+}
+
 function scheduleStroll(delay) {
-  if (!roamEnabled || hiddenMode) return;
+  muddyStroll = false;
+  footprintAcc = 0;
+  if (!roamEnabled || hiddenMode || perched) return;
   if (strollTimer) clearTimeout(strollTimer);
   if (moveTimer || restTimer) return; // already busy
   strollTimer = setTimeout(attemptStroll, delay == null ? 6000 + Math.random() * 14000 : delay);
@@ -541,6 +908,21 @@ async function attemptStroll() {
     scheduleStroll();
     return;
   }
+  if (roll < 0.47) {
+    const target = pickPerchTarget(wa); // climb up and sit on a window's title bar
+    if (target) {
+      muddyStroll = isMuddyRoll();
+      const ok = await perchOn(target, wa);
+      if (!ok) {
+        clearClimb();
+        if (windowPosY < groundY - 4) await fallToGround(groundY);
+        engineRef.applyState(stateForStatus());
+        scheduleStroll(8000);
+      }
+      return; // perchTick / leavePerch take it from here
+    }
+  }
+  muddyStroll = isMuddyRoll();
 
   const minX = wa.x;
   const maxX = wa.x + wa.width - WIN_W;
@@ -595,7 +977,8 @@ async function enterHide() {
   showSpeech("", 0);
   const groundY = groundYOf(wa);
   const edgeX = wa.x + wa.width - WIN_W; // window flush with the right edge
-  if (wasClimbing && windowPosY < groundY - 4) await fallToGround(groundY);
+  leavePerchSilently();
+  if (windowPosY < groundY - 4) await fallToGround(groundY); // off a wall or a window? drop first
   if (!hiddenMode) return;
 
   engineRef.applyState(edgeX > windowPosX ? "running-right" : "running-left");
@@ -670,6 +1053,8 @@ function setupDrag(engine) {
     if (e.button === 2) return;
     stopPetting(engine, true);
     isDragging = true; // set first so cancelStroll doesn't trigger a fall mid-grab
+    leavePerchSilently();
+    dragSamples = [];
     cancelStroll(false);
     dragStartX = e.screenX;
     dragStartY = e.screenY;
@@ -690,6 +1075,8 @@ function setupDrag(engine) {
     const newX = winStartX + (e.screenX - dragStartX);
     const newY = winStartY + (e.screenY - dragStartY);
     setPos(newX, newY);
+    dragSamples.push({ t: performance.now(), x: e.screenX, y: e.screenY });
+    if (dragSamples.length > 10) dragSamples.shift();
     const moveDx = e.screenX - lastDragX;
     if (moveDx > 1 && engine.currentState !== "running-right") engine.applyState("running-right");
     else if (moveDx < -1 && engine.currentState !== "running-left") engine.applyState("running-left");
@@ -703,6 +1090,24 @@ function setupDrag(engine) {
     if (container) {
       container.classList.remove("is-lifting");
       container.classList.add("is-dropping");
+    }
+    // Release velocity from the last ~120 ms of drag → throw, else just drop
+    const now = performance.now();
+    const recent = dragSamples.filter((s) => now - s.t < 120);
+    dragSamples = [];
+    let vx = 0;
+    let vy = 0;
+    if (recent.length >= 2) {
+      const a = recent[0];
+      const b = recent[recent.length - 1];
+      const dt = Math.max(16, b.t - a.t) / 1000;
+      vx = (b.x - a.x) / dt;
+      vy = (b.y - a.y) / dt;
+    }
+    if (Math.hypot(vx, vy) > FLING_MIN_SPEED) {
+      if (container) container.classList.remove("is-dropping");
+      fling(vx, vy);
+      return;
     }
     engine.applyState("jumping");
     setTimeout(() => {
@@ -743,7 +1148,7 @@ function setupDrag(engine) {
     if (isDragging) return;
     stopPetting(engine, true);
     menuOpen = true;
-    window.ccPet.showMenu({ roam: roamEnabled, hidden: hiddenMode, onTop: isAlwaysOnTop });
+    window.ccPet.showMenu({ roam: roamEnabled, hidden: hiddenMode, onTop: isAlwaysOnTop, mischief: mischiefEnabled });
   });
 }
 
@@ -893,6 +1298,45 @@ async function runMenuAction(engine, action) {
     case "open-claude":
       openClaude(engine);
       break;
+    case "toggle-mischief":
+      mischiefEnabled = !mischiefEnabled;
+      if (!mischiefEnabled && window.ccPet.clearFootprints) window.ccPet.clearFootprints();
+      showSpeech(mischiefEnabled ? "Trouble mode: on 😈" : "I'll behave. Promise.", 2000);
+      break;
+    case "fling": {
+      cancelStroll(false);
+      leavePerchSilently();
+      const dir = Math.random() < 0.5 ? -1 : 1;
+      fling(dir * (700 + Math.random() * 700), -(900 + Math.random() * 500));
+      break;
+    }
+    case "perch": {
+      (async () => {
+        const wa = await workArea();
+        if (!wa) return;
+        if (perched) {
+          await leavePerch();
+          return;
+        }
+        const target = pickPerchTarget(wa);
+        if (!target) {
+          showSpeech("No good window to sit on 🤔", 2500);
+          return;
+        }
+        cancelStroll(false);
+        if (windowPosY < groundYOf(wa) - 4) await fallToGround(groundYOf(wa));
+        const ok = await perchOn(target, wa);
+        if (!ok) {
+          clearClimb();
+          engine.applyState(stateForStatus());
+          scheduleStroll();
+        }
+      })();
+      break;
+    }
+    case "steal-cursor":
+      stealCursor(true);
+      break;
     case "restart":
       cancelStroll(false);
       engine.applyState("jumping");
@@ -1040,6 +1484,7 @@ function remindStretch(engine) {
 }
 
 function handleSystemIdle(engine, seconds) {
+  maybeStealCursor(engine, seconds);
   trackSitting(engine, seconds);
 
   if (currentCCStatus !== "idle" || hiddenMode || isDragging || menuOpen || petting) {
@@ -1136,6 +1581,8 @@ function main() {
   if (window.ccPet) {
     window.ccPet.onStatusUpdate((data) => handleStatusUpdate(engine, data));
     window.ccPet.onSystemIdle((seconds) => handleSystemIdle(engine, seconds));
+    window.ccPet.onWindowsUpdate((data) => handleWindowsUpdate(data));
+    if (window.ccPet.getWindows) window.ccPet.getWindows().then((d) => d && (windowsInfo = d)).catch(() => {});
     window.ccPet.onSessionsUpdate((data) => handleSessionsUpdate(data));
     window.ccPet.onFullscreenChange((active) => {
       if (active) enterHide();

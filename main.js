@@ -316,6 +316,7 @@ function startApp() {
       { label: "📊 Today's usage", click: () => menuAction("usage") },
       { label: `🚶 Roam: ${s.roam ? "On" : "Off"}`, click: () => menuAction("toggle-roam") },
       { label: s.hidden ? "👋 Bring back from edge" : "🙈 Hide at screen edge", click: () => menuAction("toggle-hide") },
+      { label: `😈 Mischief: ${s.mischief === false ? "Off" : "On"}`, click: () => menuAction("toggle-mischief") },
       {
         label: "🚀 Start with Windows",
         type: "checkbox",
@@ -334,6 +335,10 @@ function startApp() {
           { label: "🌸 Flower", click: () => menuAction("flower") },
           { label: "🍟 Snack time", click: () => menuAction("snack") },
           { label: "😴 Nap", click: () => menuAction("nap") },
+          { type: "separator" },
+          { label: "🤾 Fling me", click: () => menuAction("fling") },
+          { label: "🪟 Perch on a window", click: () => menuAction("perch") },
+          { label: "🖱️ Steal the cursor", click: () => menuAction("steal-cursor") },
         ],
       },
       { type: "separator" },
@@ -369,6 +374,7 @@ function startApp() {
             message: statusMessage,
             fullscreen: fullscreenActive,
             sessions: sessionSummary(),
+            windows: lastWindows,
           }),
         );
         return;
@@ -406,6 +412,25 @@ function startApp() {
         getUsage().then((data) => {
           res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
           res.end(JSON.stringify(data));
+        });
+        return;
+      }
+      if (req.method === "POST" && req.url === "/windows") {
+        // Inject window geometry (DIP rects) for testing the perch behaviour
+        let body = "";
+        req.setEncoding("utf8");
+        req.on("data", (chunk) => (body += chunk));
+        req.on("end", () => {
+          try {
+            const data = JSON.parse(body);
+            lastWindows = { fg: data.fg || null, claude: data.claude || null };
+            sendToRenderer("windows-update", lastWindows);
+            res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+            res.end(JSON.stringify({ ok: true }));
+          } catch (e) {
+            res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+            res.end(JSON.stringify({ error: "Invalid JSON" }));
+          }
         });
         return;
       }
@@ -527,8 +552,15 @@ function startApp() {
       while ((i = buf.indexOf("\n")) >= 0) {
         const line = buf.slice(0, i).trim();
         buf = buf.slice(i + 1);
+        if (line.startsWith("WIN:")) {
+          handleWindowsLine(line.slice(4));
+          continue;
+        }
         if (!line.startsWith("FS:")) continue;
         const active = line === "FS:1";
+        if (trailWindow && !trailWindow.isDestroyed()) {
+          if (active) trailWindow.hide();
+        }
         if (active !== fullscreenActive) {
           fullscreenActive = active;
           console.log(`[CCPet] fullscreen app ${active ? "detected" : "gone"}`);
@@ -822,6 +854,8 @@ function startApp() {
   function quitApp() {
     quitting = true;
     stopFullscreenWatcher();
+    stopCursorHelper();
+    if (trailWindow && !trailWindow.isDestroyed()) trailWindow.destroy();
     if (httpServer) httpServer.close();
     if (completedTimer) clearTimeout(completedTimer);
     if (tray) {
@@ -889,6 +923,137 @@ function startApp() {
     }
   }
   ipcMain.on("open-claude", () => openClaudeApp());
+
+  // ─── Window geometry from the watcher (physical px → DIP) ──
+  let lastWindows = { fg: null, claude: null };
+  function rectToDip(w) {
+    if (!w || typeof w.l !== "number") return null;
+    if (w.l <= -30000 || w.r - w.l <= 0 || w.b - w.t <= 0) return null; // minimized / bogus
+    const tl = screen.screenToDipPoint({ x: w.l, y: w.t });
+    const br = screen.screenToDipPoint({ x: w.r, y: w.b });
+    return {
+      hwnd: w.hwnd,
+      x: Math.round(tl.x),
+      y: Math.round(tl.y),
+      w: Math.round(br.x - tl.x),
+      h: Math.round(br.y - tl.y),
+      title: w.title || "",
+      cls: w.cls || "",
+      pid: w.pid || 0,
+      maximized: !!w.maximized,
+      fullscreen: !!w.fullscreen,
+    };
+  }
+  function handleWindowsLine(json) {
+    let data;
+    try {
+      data = JSON.parse(json);
+    } catch (e) {
+      return;
+    }
+    lastWindows = { fg: rectToDip(data.fg), claude: rectToDip(data.claude) };
+    sendToRenderer("windows-update", lastWindows);
+  }
+  ipcMain.handle("get-windows", () => lastWindows);
+
+  // ─── Muddy footprints: click-through overlay over the pet's work area ──
+  let trailWindow = null;
+  let trailBounds = null;
+  function createTrailWindow() {
+    if (trailWindow && !trailWindow.isDestroyed()) return trailWindow;
+    let cx = 0;
+    let cy = 0;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      const b = mainWindow.getBounds();
+      cx = b.x + Math.round(b.width / 2);
+      cy = b.y + Math.round(b.height / 2);
+    }
+    trailBounds = screen.getDisplayNearestPoint({ x: cx, y: cy }).workArea;
+    trailWindow = new BrowserWindow({
+      x: trailBounds.x,
+      y: trailBounds.y,
+      width: trailBounds.width,
+      height: trailBounds.height,
+      title: " ",
+      frame: false,
+      transparent: true,
+      backgroundColor: "#00000000",
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      focusable: false,
+      resizable: false,
+      movable: false,
+      hasShadow: false,
+      show: false,
+      webPreferences: {
+        preload: path.join(__dirname, "renderer", "trail-preload.js"),
+        contextIsolation: true,
+        nodeIntegration: false,
+        zoomFactor: 1,
+      },
+    });
+    trailWindow.setIgnoreMouseEvents(true, { forward: true });
+    trailWindow.setAlwaysOnTop(true, "floating"); // below the pet ("screen-saver" level)
+    trailWindow.loadFile(path.join(__dirname, "renderer", "trail.html"));
+    trailWindow.on("closed", () => {
+      trailWindow = null;
+    });
+    return trailWindow;
+  }
+  ipcMain.on("footprint", (event, fp) => {
+    if (fullscreenActive || !fp) return;
+    const win = createTrailWindow();
+    if (!win || !trailBounds) return;
+    const local = { x: fp.x - trailBounds.x, y: fp.y - trailBounds.y, dir: fp.dir, tone: fp.tone };
+    if (local.x < 0 || local.y < 0 || local.x > trailBounds.width || local.y > trailBounds.height) return;
+    if (!win.isVisible()) win.showInactive();
+    win.webContents.send("footprint", local);
+  });
+  ipcMain.on("trail-clear", () => {
+    if (trailWindow && !trailWindow.isDestroyed()) trailWindow.webContents.send("trail-clear");
+  });
+  ipcMain.on("trail-idle", () => {
+    if (trailWindow && !trailWindow.isDestroyed()) trailWindow.hide(); // nothing left to show
+  });
+
+  // ─── Cursor stealing: lazy PowerShell helper that moves the mouse ──
+  let cursorHelper = null;
+  function ensureCursorHelper() {
+    if (cursorHelper) return cursorHelper;
+    const script = path.join(__dirname, "scripts", "cursor-helper.ps1");
+    if (process.platform !== "win32" || !fs.existsSync(script)) return null;
+    try {
+      cursorHelper = spawn(
+        "powershell.exe",
+        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script],
+        { windowsHide: true, stdio: ["pipe", "ignore", "ignore"] },
+      );
+      cursorHelper.on("exit", () => {
+        cursorHelper = null;
+      });
+    } catch (e) {
+      cursorHelper = null;
+    }
+    return cursorHelper;
+  }
+  function stopCursorHelper() {
+    if (cursorHelper) {
+      try {
+        cursorHelper.stdin.write("QUIT\n");
+        cursorHelper.kill();
+      } catch (e) {
+        /* ignore */
+      }
+      cursorHelper = null;
+    }
+  }
+  ipcMain.handle("get-cursor", () => screen.getCursorScreenPoint());
+  ipcMain.on("set-cursor", (event, { x, y }) => {
+    const h = ensureCursorHelper();
+    if (!h || !h.stdin || !h.stdin.writable) return;
+    const p = screen.dipToScreenPoint({ x: Math.round(x), y: Math.round(y) });
+    h.stdin.write(`SET ${Math.round(p.x)} ${Math.round(p.y)}\n`);
+  });
 
   // ─── Pet import / management ─────────────────────────
   ipcMain.handle("import-pet-zip", async () => {
@@ -973,6 +1138,7 @@ function startApp() {
     createTray();
     startFullscreenWatcher();
     startIdleMonitor();
+    createTrailWindow(); // pre-create so the first footprint isn't lost while it loads
     startUsagePrefetch();
 
     // Start with Windows: default ON for the packaged app, remembered in config
