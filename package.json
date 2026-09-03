@@ -1,6 +1,6 @@
 {
   "name": "clawd-pet",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "A pixel crab desktop pet that watches your Claude Code sessions",
   "main": "main.js",
   "scripts": {
