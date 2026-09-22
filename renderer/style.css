@@ -181,6 +181,175 @@ body {
     }
 }
 
+/* ─── Usage card: this week's cost curve + tokens per day ── */
+/* Same pixel frame as the bubble. Series colours were checked with the dataviz validator on
+   white: coral (the crab) for cost, blue for tokens, a lighter blue step for days other than today. */
+#usage-card {
+    --uc-surface: #fff;
+    --uc-ink: #1a1a2e;
+    --uc-ink-2: #55556b;
+    --uc-ink-3: #9a9aad;
+    --uc-grid: #ecebe6;
+    --uc-axis: #d6d4cc;
+    --uc-cost: #d97757;
+    --uc-tok: #2a78d6;
+    --uc-tok-soft: #86b6ef;
+
+    position: absolute;
+    left: 50%;
+    bottom: 122px;
+    transform: translateX(-50%);
+    width: 284px; /* border-box: the 264px chart + 2×8px padding + 2×2px border */
+    padding: 5px 8px 6px;
+    background: var(--uc-surface);
+    color: var(--uc-ink);
+    font-family: "Microsoft YaHei", "SimHei", "Noto Sans SC", sans-serif;
+    border: 2px solid var(--uc-ink);
+    border-radius: 6px;
+    box-shadow: 2px 2px 0 var(--uc-ink);
+    pointer-events: auto;
+    cursor: pointer;
+    z-index: 10002;
+}
+
+.uc-head {
+    margin-bottom: 0;
+}
+
+.uc-week {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    line-height: 16px;
+}
+
+.uc-label {
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--uc-ink-3);
+}
+
+.uc-total {
+    font-size: 13px;
+    font-weight: 800;
+}
+
+.uc-focus {
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 13px;
+    color: var(--uc-ink-2);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.uc-chart {
+    display: block;
+    overflow: visible;
+}
+
+.uc-grid {
+    stroke: var(--uc-grid);
+    stroke-width: 1;
+}
+
+.uc-axis {
+    stroke: var(--uc-axis);
+    stroke-width: 1;
+}
+
+.uc-cross {
+    stroke: var(--uc-ink-3);
+    stroke-width: 1;
+}
+
+.uc-tick,
+.uc-day,
+.uc-value {
+    font-family: inherit;
+    font-size: 9px;
+    font-variant-numeric: tabular-nums;
+}
+
+/* Halo in the card colour: lines, dots and the hover crosshair never cut through a number */
+.uc-tick,
+.uc-value {
+    paint-order: stroke;
+    stroke: var(--uc-surface);
+    stroke-width: 3px;
+    stroke-linejoin: round;
+}
+
+.uc-tick {
+    fill: var(--uc-ink-3);
+    font-weight: 700;
+}
+
+.uc-value {
+    fill: var(--uc-ink);
+    font-weight: 800;
+}
+
+.uc-day {
+    fill: var(--uc-ink-2);
+    font-weight: 700;
+}
+
+.uc-day-today {
+    fill: var(--uc-ink);
+    font-weight: 900;
+}
+
+.uc-day-future {
+    fill: var(--uc-ink-3);
+    font-weight: 400;
+}
+
+.uc-area {
+    fill: var(--uc-cost);
+    fill-opacity: 0.12;
+    stroke: none;
+}
+
+.uc-line {
+    fill: none;
+    stroke: var(--uc-cost);
+    stroke-width: 2;
+    stroke-linejoin: round;
+    stroke-linecap: round;
+}
+
+.uc-dot {
+    fill: var(--uc-cost);
+    stroke: var(--uc-surface);
+    stroke-width: 2;
+}
+
+.uc-bar {
+    fill: var(--uc-tok-soft);
+}
+
+.uc-bar.uc-today {
+    fill: var(--uc-tok);
+}
+
+.uc-hit {
+    fill: transparent;
+    pointer-events: all;
+}
+
+.uc-note {
+    margin-top: 1px;
+    font-size: 9px;
+    font-weight: 700;
+    line-height: 12px;
+    color: var(--uc-ink-2);
+    white-space: nowrap; /* one line: the card must stay inside the 280px window */
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
 /* ─── Session badge (≥ 2 concurrent Claude Code sessions) ── */
 #session-badge {
     position: absolute;

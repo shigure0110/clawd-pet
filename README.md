@@ -8,7 +8,7 @@ A pixel crab that lives on your desktop, watches every Claude Code session on th
 
 - **Watches Claude Code** — hooks report tool calls, prompts and turn endings. The crab pulls out a laptop and types while Claude works.
 - **Tells you when to come back** — a run longer than 15 s ends with a notification: *"Ready to move on — 「project」"*. Quick chat turns stay silent.
-- **Click → today's spend** — token counts plus the API-equivalent cost for today, via [ccusage](https://github.com/ryoppippi/ccusage) (offline pricing, nothing leaves your machine).
+- **Click → this week's spend** — a small card with the API-equivalent cost per day (Mon–Sun) over tokens per day, via [ccusage](https://github.com/ryoppippi/ccusage) (offline pricing, nothing leaves your machine). `ccusage-pricing.json` adds list prices for models newer than ccusage's own table, so they don't count as $0.
 - **Roams your desktop** — strolls the bottom edge, climbs the screen sides, naps, snacks by time of day, and falls back down if you drop it mid-air.
 - **Stays out of the way** — when a fullscreen app is in front it climbs the right edge and slides its lower half off-screen, so just its head peeks in — click-through, headphones on, gamepad in hand.
 - **Keeps you company** — hover to pet it (hearts), a stretch reminder after 50 minutes at the keyboard, and a badge when several Claude sessions run at once.
@@ -72,13 +72,30 @@ Requires Node.js 18+. Windows only for now — the fullscreen watcher and start-
 
 ## Using it
 
-- **Left click** — today's usage and cost
+- **Left click** — this week's cost curve and tokens per day; hover a day for its numbers, click the card to close it
 - **Double click** — bring the Claude desktop app to the front (launches it if it isn't running)
 - **Drag** — move it; drop it in mid-air and it falls; let go while moving fast to throw it
 - **Hover** — petting
 - **Right click / tray icon** — usage, roaming, hide at screen edge, tricks, start-with-Windows, restart, quit
 
 "Hide at screen edge" makes the crab climb the right edge and hang there with its lower half off-screen, click-through, so it is visible but never in the way — the same thing it does by itself when a fullscreen app is in front.
+
+## If the crab disappears
+
+It looks after itself:
+
+- **Renderer crash or hang** — the window reloads itself, backing off if it keeps crashing.
+- **Running `Clawd.exe` again** while it is up brings a lost crab back (dead window, off-screen) instead of doing nothing.
+- **The whole app died** — the next Claude Code hook event relaunches it (at most every 2 minutes), unless you quit it from the menu.
+- **Quit from the menu** keeps it off until you start `Clawd.exe` again or the next Windows sign-in, where *Start with Windows* brings it back (untick that to keep it off across restarts). Ending `Clawd.exe` in Task Manager counts as a crash, so the hooks bring it back.
+- **Alt+F4** on the crab is ignored; quit from the menu instead.
+- **Start with Windows** writes a quoted path to the Run key, so a stray file named like the first part of a path with spaces can't hijack logon.
+
+To find out why it went away, read `logs\clawd.log` next to `Clawd.exe` (starts, quits, crashes, recoveries, and "previous run ended without a clean quit"; `npm run build` recreates `dist/`, so a rebuild starts a fresh log), or run the read-only check (in a release zip it is `resources/app/scripts/doctor.ps1`):
+
+```bash
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/doctor.ps1
+```
 
 ## Sprite art
 
@@ -101,6 +118,7 @@ Claude Code hook ──> hooks/notify.js ──POST──> 127.0.0.1:31126/statu
 | Path | Role |
 | --- | --- |
 | `main.js` | window, tray, HTTP status server, ccusage, fullscreen + idle watchers |
+| `ccusage-pricing.json` | ccusage price overrides for models its built-in table doesn't know yet |
 | `preload.js` | IPC bridge |
 | `renderer/pet.js` | animation engine, roaming/climbing/hiding, menu actions |
 | `hooks/notify.js` | maps hook events to `idle` / `running` / `waiting` / `completed` / `error` |
@@ -108,6 +126,7 @@ Claude Code hook ──> hooks/notify.js ──POST──> 127.0.0.1:31126/statu
 | `scripts/fullscreen-watch.ps1` | window watcher: fullscreen state (`FS:`) and window geometry for perching (`WIN:`) |
 | `scripts/cursor-helper.ps1` | moves the mouse cursor for the cursor-stealing trick |
 | `scripts/focus-claude.ps1` | brings the Claude app to the front / launches it |
+| `scripts/doctor.ps1` | read-only health check: process, window, start-with-Windows entry, hooks, log, Windows crash events |
 | `renderer/trail.*` | click-through overlay that draws the fading footprints |
 
 Push a status by hand:
@@ -116,7 +135,7 @@ Push a status by hand:
 curl -X POST http://127.0.0.1:31126/status -H "Content-Type: application/json" -d "{\"status\":\"running\",\"message\":\"hello\"}"
 ```
 
-`GET /status`, `GET /usage`, and `POST /action`, `/fullscreen`, `/idle`, `/restart` are also available on localhost for testing.
+`GET /status`, `GET /health`, `GET /usage`, and `POST /action`, `/fullscreen`, `/idle`, `/restart`, `/debug/crash-renderer`, `/debug/usage` (show the card with canned data; `null` restores) are also available on localhost for testing.
 
 ## Credits
 

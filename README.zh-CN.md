@@ -8,7 +8,7 @@
 
 - **盯着 Claude Code** —— 通过 hooks 接收工具调用、提问和轮次结束事件。Claude 干活时，螃蟹会掏出笔记本敲键盘。
 - **该回来时叫你** —— 跑了超过 15 秒的轮次结束时弹通知：*「『项目名』可以推进了」*；秒回的闲聊轮次保持安静。
-- **点一下看今天花了多少** —— token 用量加上今日 API 等价费用，数据来自 [ccusage](https://github.com/ryoppippi/ccusage)（离线定价，不联网、数据不出本机）。
+- **点一下看这周花了多少** —— 一张小卡片：本周（周一到周日）每天的 API 等价费用曲线，下面是每天的 token 用量，数据来自 [ccusage](https://github.com/ryoppippi/ccusage)（离线定价，不联网、数据不出本机）。`ccusage-pricing.json` 给 ccusage 自带价格表里还没有的新模型补上官方价格，免得记成 $0。
 - **在桌面自由活动** —— 沿底边散步、爬屏幕两侧的「墙」、打盹、按时段吃点东西；被拎到半空松手会掉下来。
 - **自觉让路** —— 检测到全屏应用时，爬上屏幕右缘、下半身滑出屏幕外只露个头，变成点击穿透，戴上耳机拿起手柄。
 - **陪着你** —— 鼠标悬停可以摸头（冒爱心）、连续用键盘 50 分钟提醒起来活动、同时开多个 Claude 会话时显示数量徽章。
@@ -72,13 +72,30 @@ npm run build      # 产物在 dist/Clawd-win32-x64/Clawd.exe
 
 ## 怎么用
 
-- **左键点击** —— 显示今日用量和费用
+- **左键点击** —— 本周费用曲线和每天的 token 用量；鼠标停在某天上看当天明细，点卡片关闭
 - **双击** —— 把 Claude 桌面应用拉到前台（没开着就启动它）
 - **拖动** —— 换位置；在半空松手它会掉下去；拖动中快速松手就是把它甩出去
 - **悬停** —— 摸头
 - **右键 / 托盘图标** —— 用量、自由活动开关、躲到屏幕边缘、才艺表演、开机自启、重启、退出
 
 「躲到屏幕边缘」会让螃蟹爬上屏幕右缘挂着、下半身藏在屏幕外，并变成点击穿透 —— 看得见但绝不挡事、也点不到。这和检测到全屏应用时它自动做的是同一件事。
+
+## 螃蟹不见了怎么办
+
+它会自己照看自己：
+
+- **渲染进程崩溃或卡死** —— 窗口自动重新加载；反复崩溃时会逐步拉长间隔。
+- **再运行一次 `Clawd.exe`** —— 桌宠还在跑时，会把丢了的螃蟹（窗口死掉、跑到屏幕外）找回来，而不是毫无反应。
+- **整个程序退出了** —— 下一次 Claude Code hook 事件会把它重新拉起（最多每 2 分钟一次）；你从菜单 Quit 的除外。
+- **从菜单 Quit** 之后，它会一直关着，直到你再运行 `Clawd.exe`，或者下次登录 Windows 时被「开机自启」带起来（想重启后也不出现，就取消勾选 *Start with Windows*）。在任务管理器里结束 `Clawd.exe` 算作崩溃，hooks 会把它拉回来。
+- 在螃蟹上按 **Alt+F4** 不会关掉它，退出请用菜单。
+- **开机自启**写进注册表 Run 键的路径带引号：路径含空格时，不会被恰好和路径前半截同名的杂散文件劫持。
+
+想知道它为什么没了：看 `Clawd.exe` 旁边的 `logs\clawd.log`（启动、退出、崩溃、自动恢复，以及「上次没有正常退出」；`npm run build` 会重建 `dist/`，重新打包后日志从头开始），或者跑只读体检（发布包里在 `resources/app/scripts/doctor.ps1`）：
+
+```bash
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/doctor.ps1
+```
 
 ## 精灵图
 
@@ -101,6 +118,7 @@ Claude Code hook ──> hooks/notify.js ──POST──> 127.0.0.1:31126/statu
 | 路径 | 职责 |
 | --- | --- |
 | `main.js` | 窗口、托盘、HTTP 状态服务、ccusage、全屏与闲置监视 |
+| `ccusage-pricing.json` | ccusage 价格覆盖：它自带价格表里还没有的模型 |
 | `preload.js` | IPC 桥接 |
 | `renderer/pet.js` | 动画引擎、漫游/爬墙/躲避、菜单动作 |
 | `hooks/notify.js` | 把 hook 事件映射成 `idle` / `running` / `waiting` / `completed` / `error` |
@@ -108,6 +126,7 @@ Claude Code hook ──> hooks/notify.js ──POST──> 127.0.0.1:31126/statu
 | `scripts/fullscreen-watch.ps1` | 窗口监视：全屏状态（`FS:`）和用于上窗的窗口位置（`WIN:`） |
 | `scripts/cursor-helper.ps1` | 偷光标时负责移动鼠标 |
 | `scripts/focus-claude.ps1` | 把 Claude 应用拉到前台 / 启动它 |
+| `scripts/doctor.ps1` | 只读体检：进程、窗口、开机自启项、hooks、日志、Windows 崩溃记录 |
 | `renderer/trail.*` | 画渐隐脚印的点击穿透覆盖层 |
 
 手动推送状态：
@@ -116,7 +135,7 @@ Claude Code hook ──> hooks/notify.js ──POST──> 127.0.0.1:31126/statu
 curl -X POST http://127.0.0.1:31126/status -H "Content-Type: application/json" -d "{\"status\":\"running\",\"message\":\"hello\"}"
 ```
 
-本地还开放了 `GET /status`、`GET /usage`，以及 `POST /action`、`/fullscreen`、`/idle`、`/restart` 用于调试。
+本地还开放了 `GET /status`、`GET /health`、`GET /usage`，以及 `POST /action`、`/fullscreen`、`/idle`、`/restart`、`/debug/crash-renderer`、`/debug/usage`（用给定数据显示卡片，发 `null` 恢复）用于调试。
 
 ## 致谢
 

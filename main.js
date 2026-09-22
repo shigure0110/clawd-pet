@@ -32,12 +32,193 @@ function startApp() {
   const os = require("os");
   const { spawn } = require("child_process");
   const AdmZip = require("adm-zip");
+  const util = require("util");
 
   // Only one Claw'd at a time (matters with auto-start)
   if (!app.requestSingleInstanceLock()) {
     app.quit();
     return;
   }
+
+  // process.execPath keeps whatever spelling the exe was launched with (case, 8.3 names, junctions);
+  // the Run value and watchdog.json need one canonical path, or a re-spelled launch rewrites them
+  const EXE = (() => {
+    try {
+      return fs.realpathSync.native(process.execPath);
+    } catch (e) {
+      return process.execPath;
+    }
+  })();
+
+  // ─── Log file + crash breadcrumbs ────────────────────
+  // Packaged: <exe dir>\logs\clawd.log (from source: <repo>\logs\), falling back to userData only
+  // if that folder isn't writable. When the pet vanishes, this is what tells us why.
+  const LOG_MAX_BYTES = 1024 * 1024; // then rotated to clawd.old.log
+  const logDir = resolveLogDir();
+  function resolveLogDir() {
+    const dirs = [
+      app.isPackaged ? path.join(path.dirname(EXE), "logs") : path.join(__dirname, "logs"),
+      path.join(app.getPath("userData"), "logs"),
+    ];
+    for (const dir of dirs) {
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+        fs.accessSync(dir, fs.constants.W_OK);
+        return dir;
+      } catch (e) {
+        /* try the next one */
+      }
+    }
+    return "";
+  }
+  function stamp(d = new Date()) {
+    const p = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  }
+  function writeLog(level, args) {
+    const msg = util.format(...args);
+    (level === "ERROR" ? console.error : console.log)(`[CCPet] ${msg}`);
+    if (!logDir) return;
+    const file = path.join(logDir, "clawd.log");
+    try {
+      try {
+        if (fs.statSync(file).size > LOG_MAX_BYTES) fs.renameSync(file, path.join(logDir, "clawd.old.log"));
+      } catch (e) {
+        /* no log yet */
+      }
+      fs.appendFileSync(file, `${stamp()} [${process.pid}] ${level} ${msg}\r\n`, "utf8");
+    } catch (e) {
+      /* logging must never take the pet down */
+    }
+  }
+  const lastLogged = new Map(); // throttle key → last time written
+  const log = {
+    info: (...a) => writeLog("INFO", a),
+    warn: (...a) => writeLog("WARN", a),
+    error: (...a) => writeLog("ERROR", a),
+    // Same key at most once per `ms` (an error thrown in a loop, a helper that keeps dying)
+    throttled(key, ms, level, ...a) {
+      const now = Date.now();
+      if (now - (lastLogged.get(key) || 0) < ms) return;
+      lastLogged.set(key, now);
+      writeLog(level, a);
+    },
+  };
+
+  // Log instead of Electron's default modal "A JavaScript error occurred in the main process"
+  // box: one bad handler shouldn't block the screen with a dialog or take the pet down.
+  process.on("uncaughtException", (err) =>
+    log.throttled(`uncaught:${err && err.message}`, 60000, "ERROR", "uncaught exception:", err),
+  );
+  process.on("unhandledRejection", (reason) =>
+    log.throttled(`rejection:${reason && reason.message}`, 60000, "ERROR", "unhandled rejection:", reason),
+  );
+
+  // running.json exists only while an instance is up. Finding one at startup means the previous
+  // run never reached a clean quit (killed, crashed, power loss); lastAlive brackets when it died.
+  const runMarker = logDir ? path.join(logDir, "running.json") : "";
+  const startedAt = stamp();
+  function touchRunMarker() {
+    if (!runMarker) return;
+    try {
+      fs.writeFileSync(runMarker, JSON.stringify({ pid: process.pid, startedAt, lastAlive: stamp() }), "utf8");
+    } catch (e) {
+      /* ignore */
+    }
+  }
+  function clearRunMarker() {
+    if (!runMarker) return;
+    try {
+      fs.rmSync(runMarker, { force: true });
+    } catch (e) {
+      /* ignore */
+    }
+  }
+  function checkPreviousRun() {
+    if (!runMarker) return;
+    let raw;
+    try {
+      raw = fs.readFileSync(runMarker, "utf8");
+    } catch (e) {
+      return; // no marker: the last run quit cleanly (or this is the first run)
+    }
+    let prev = {};
+    try {
+      prev = JSON.parse(raw);
+    } catch (e) {
+      /* half-written marker */
+    }
+    log.warn(
+      `previous run (pid ${prev.pid}, started ${prev.startedAt}, last seen alive ${prev.lastAlive}) ` +
+        "ended without a clean quit: killed, crashed or power loss",
+    );
+  }
+  checkPreviousRun();
+  touchRunMarker();
+  log.info(`started v${app.getVersion()} (${app.isPackaged ? "packaged" : "from source"}) ${EXE}`);
+
+  // ─── Escape another app's MSIX container ─────────────
+  // Launched from a Claude Code session in the Claude desktop app (an MSIX package), this process
+  // inherits that app's file-system virtualization: %APPDATA% writes land in %LOCALAPPDATA%\
+  // Packages\<app>\LocalCache\Roaming, invisible outside it. A probe file tells; relaunch through
+  // explorer.exe (same as a double-click) to get out — at most once a minute, so it can't loop.
+  function hostContainer() {
+    if (process.platform !== "win32" || !process.env.LOCALAPPDATA) return null;
+    const probe = `.container-probe-${process.pid}`;
+    const probePath = path.join(app.getPath("userData"), probe);
+    try {
+      fs.writeFileSync(probePath, "");
+      const pkgRoot = path.join(process.env.LOCALAPPDATA, "Packages");
+      const dirName = path.basename(app.getPath("userData"));
+      return fs.readdirSync(pkgRoot).find((pkg) => fs.existsSync(path.join(pkgRoot, pkg, "LocalCache", "Roaming", dirName, probe))) || null;
+    } catch (e) {
+      return null; // can't tell: carry on
+    } finally {
+      try {
+        fs.rmSync(probePath, { force: true });
+      } catch (e) {
+        /* ignore */
+      }
+    }
+  }
+  const container = app.isPackaged ? hostContainer() : null;
+  if (container) {
+    const stampFile = logDir ? path.join(logDir, "container-escape.stamp") : "";
+    let recent = false;
+    try {
+      recent = Date.now() - fs.statSync(stampFile).mtimeMs < 60000;
+    } catch (e) {
+      /* never tried */
+    }
+    if (!recent && stampFile) {
+      log.warn(`started inside ${container}'s app container (%APPDATA% writes are virtualized), relaunching via explorer.exe`);
+      try {
+        fs.writeFileSync(stampFile, String(Date.now()));
+      } catch (e) {
+        /* the log dir was writable a moment ago */
+      }
+      app.releaseSingleInstanceLock(); // let the relaunched copy take it
+      spawn("explorer.exe", [EXE], { detached: true, stdio: "ignore" }).on("error", () => {}).unref();
+      clearRunMarker();
+      app.exit(0);
+      return;
+    }
+    log.warn(`still inside ${container}'s app container after relaunching; carrying on`);
+  }
+
+  // <logDir>\watchdog.json tells hooks/notify.js where the exe is and whether the user quit on
+  // purpose. It lives next to the exe, not in %APPDATA%: hooks run inside the Claude desktop app's
+  // MSIX container, which sees its own virtualized (stale) copy of %APPDATA%.
+  function writeWatchdogState(patch) {
+    if (!logDir || !app.isPackaged) return;
+    const file = path.join(logDir, "watchdog.json");
+    try {
+      fs.writeFileSync(file, JSON.stringify({ exePath: EXE, quitByUser: false, ...patch }, null, 2), "utf8");
+    } catch (e) {
+      log.warn("writing watchdog.json failed:", e.message);
+    }
+  }
+  writeWatchdogState({});
 
   let mainWindow = null;
   let httpServer = null;
@@ -77,7 +258,7 @@ function startApp() {
     try {
       fs.writeFileSync(configPath(), JSON.stringify(cfg, null, 2), "utf8");
     } catch (e) {
-      /* ignore */
+      log.warn("saving pet-config.json failed:", e.message);
     }
     return cfg;
   }
@@ -144,6 +325,7 @@ function startApp() {
         // otherwise zoom (e.g. 1.25x), pushing the pet off-centre and clipping bubbles.
         mainWindow.webContents.setZoomFactor(1);
         if (fullscreenActive) mainWindow.webContents.send("fullscreen-change", true);
+        if (sessions.size) broadcastSessions(); // a reloaded renderer starts without the badge
       }
     });
     mainWindow.setIgnoreMouseEvents(false);
@@ -151,9 +333,87 @@ function startApp() {
     mainWindow.webContents.on("console-message", (event, level, message) => {
       if (message && message.startsWith("[pet]")) console.log(message);
     });
+
+    // A stray Alt+F4 while the pet has focus would leave a tray-only process with no pet (and
+    // relaunching the exe would only ping it). Quitting goes through the menu / tray instead.
+    mainWindow.on("close", (e) => {
+      if (quitting) return;
+      e.preventDefault();
+      log.warn("ignored a close request on the pet window (Alt+F4?); use Quit in the menu");
+    });
+    mainWindow.on("session-end", () => {
+      quitting = true;
+      log.info("Windows session is ending (sign-out / restart / shutdown)");
+      clearRunMarker();
+      // With Start with Windows off, the pet stays off after the next sign-in: the hook
+      // watchdog must not bring it back just because a Claude Code session starts
+      if (loadConfig().autoStart === false) writeWatchdogState({ quitByUser: true });
+    });
+
+    // Hung renderer: 'unresponsive' needs pending input, so it fires once the user pokes the pet
+    let hangTimer = null;
+    mainWindow.on("unresponsive", () => {
+      log.warn("pet renderer unresponsive");
+      clearTimeout(hangTimer);
+      hangTimer = setTimeout(() => {
+        hangTimer = null;
+        if (quitting || !mainWindow || mainWindow.isDestroyed()) return;
+        log.warn("pet renderer still hung after 15s, restarting it");
+        mainWindow.webContents.forcefullyCrashRenderer(); // → render-process-gone → recoverRenderer
+      }, 15000);
+    });
+    mainWindow.on("responsive", () => {
+      if (!hangTimer) return;
+      clearTimeout(hangTimer);
+      hangTimer = null;
+      log.info("pet renderer responsive again");
+    });
+    mainWindow.webContents.on("render-process-gone", (event, details) => recoverRenderer(details));
+
     mainWindow.on("closed", () => {
       mainWindow = null;
     });
+  }
+
+  // ─── Renderer crash recovery ─────────────────────────
+  // A dead renderer leaves an invisible window inside a live process: the pet is "gone", yet the
+  // tray icon stays and relaunching the exe only pings this instance. Reload it, backing off if
+  // it keeps dying (0s, 2s, 4s, 8s, 16s, then every 10 min while it crashes ≥6 times in 10 min).
+  const rendererDeaths = [];
+  let rendererRecoveries = 0;
+  let recoverTimer = null;
+  function recoverRenderer(details) {
+    if (quitting || !mainWindow || mainWindow.isDestroyed()) return;
+    const now = Date.now();
+    while (rendererDeaths.length && now - rendererDeaths[0] > 10 * 60 * 1000) rendererDeaths.shift();
+    rendererDeaths.push(now);
+    const n = rendererDeaths.length;
+    const delay = n === 1 ? 0 : n <= 5 ? 2000 * 2 ** (n - 2) : 10 * 60 * 1000;
+    const why = `${(details && details.reason) || "unknown"}, exit code ${details && details.exitCode}`;
+    log.warn(`pet renderer gone (${why}), reloading in ${delay / 1000}s [${n} in the last 10 min]`);
+    clearTimeout(recoverTimer);
+    recoverTimer = setTimeout(() => {
+      recoverTimer = null;
+      if (quitting || !mainWindow || mainWindow.isDestroyed()) return;
+      rendererRecoveries++;
+      mainWindow.setIgnoreMouseEvents(false); // it may have died tucked away, click-through
+      if (!isOnScreen(mainWindow.getBounds())) placeAtHome();
+      mainWindow.webContents.reload();
+    }, delay);
+  }
+
+  // At least 40×40 px of the window inside some display
+  function isOnScreen(b) {
+    return screen.getAllDisplays().some(({ bounds: d }) => {
+      const w = Math.min(b.x + b.width, d.x + d.width) - Math.max(b.x, d.x);
+      const h = Math.min(b.y + b.height, d.y + d.height) - Math.max(b.y, d.y);
+      return w >= 40 && h >= 40;
+    });
+  }
+  // Bottom-right corner of the primary work area, where a fresh pet starts
+  function placeAtHome() {
+    const wa = screen.getPrimaryDisplay().workArea;
+    mainWindow.setBounds({ x: wa.x + wa.width - WIN_W, y: wa.y + wa.height - WIN_H, width: WIN_W, height: WIN_H }, false);
   }
 
   function sendToRenderer(channel, payload) {
@@ -313,7 +573,7 @@ function startApp() {
     const s = state || {};
     const template = [
       { label: "💬 Open Claude", click: () => menuAction("open-claude") },
-      { label: "📊 Today's usage", click: () => menuAction("usage") },
+      { label: "📊 This week's usage", click: () => menuAction("usage") },
       { label: `🚶 Roam: ${s.roam ? "On" : "Off"}`, click: () => menuAction("toggle-roam") },
       { label: s.hidden ? "👋 Bring back from edge" : "🙈 Hide at screen edge", click: () => menuAction("toggle-hide") },
       { label: `😈 Mischief: ${s.mischief === false ? "Off" : "On"}`, click: () => menuAction("toggle-mischief") },
@@ -460,6 +720,41 @@ function startApp() {
         setTimeout(restartApp, 200);
         return;
       }
+      if (req.method === "GET" && req.url === "/health") {
+        // Self-check for scripts/doctor.ps1: is the pet really visible, will it start at logon?
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify(healthReport()));
+        return;
+      }
+      if (req.method === "POST" && req.url === "/debug/usage") {
+        // Show the usage card with canned data for 2 minutes (body = what GET /usage returns;
+        // `null` goes back to the real numbers)
+        let body = "";
+        req.setEncoding("utf8");
+        req.on("data", (chunk) => (body += chunk));
+        req.on("end", () => {
+          try {
+            const data = JSON.parse(body);
+            usageOverride = data ? { data, until: Date.now() + 120000 } : null;
+            if (data) sendToRenderer("tray-command", "usage");
+            res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+            res.end(JSON.stringify({ ok: true }));
+          } catch (e) {
+            res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+            res.end(JSON.stringify({ error: "Invalid JSON" }));
+          }
+        });
+        return;
+      }
+      if (req.method === "POST" && req.url === "/debug/crash-renderer") {
+        // Exercise the crash-recovery path on purpose
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true }));
+        setTimeout(() => {
+          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.forcefullyCrashRenderer();
+        }, 100);
+        return;
+      }
       if (req.method === "POST" && req.url === "/idle") {
         // Simulate system idle seconds for 90s (testing doze/sleep)
         let body = "";
@@ -502,10 +797,11 @@ function startApp() {
     });
 
     httpServer.on("error", (e) => {
-      console.error("[CCPet] status server error:", e.message);
+      // e.g. EADDRINUSE: the pet runs, but Claude Code hooks can't reach it
+      log.error("status server error:", e.message);
     });
     httpServer.listen(PORT, "127.0.0.1", () => {
-      console.log(`[CCPet] status server: http://127.0.0.1:${PORT}`);
+      log.info(`status server: http://127.0.0.1:${PORT}`);
     });
   }
 
@@ -541,10 +837,22 @@ function startApp() {
         { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] },
       );
     } catch (e) {
-      console.error("[CCPet] fullscreen watcher failed:", e.message);
+      log.error("fullscreen watcher failed to start:", e.message);
       return;
     }
     fsWatcher = child;
+    // Restart it whenever it dies; 'error' (e.g. powershell.exe not found) may come without 'exit'
+    let restarting = false;
+    const restart = (why) => {
+      if (restarting) return;
+      restarting = true;
+      if (fsWatcher === child) fsWatcher = null;
+      if (quitting) return;
+      log.throttled("watcher-exit", 10 * 60 * 1000, "WARN", `fullscreen watcher ${why}, restarting in 10s`);
+      setTimeout(startFullscreenWatcher, 10000);
+    };
+    child.on("error", (e) => restart(`error: ${e.message}`));
+    child.on("exit", (code) => restart(`exited (code ${code})`));
     let buf = "";
     child.stdout.on("data", (chunk) => {
       buf += chunk.toString();
@@ -567,10 +875,6 @@ function startApp() {
           sendToRenderer("fullscreen-change", active);
         }
       }
-    });
-    child.on("exit", () => {
-      fsWatcher = null;
-      if (!quitting) setTimeout(startFullscreenWatcher, 10000);
     });
   }
 
@@ -611,19 +915,72 @@ function startApp() {
     return nodeExeCache;
   }
 
-  function todayYmd() {
-    const d = new Date();
-    return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
+  // ccusage's built-in price table lags new models, which then count as $0; ccusage-pricing.json
+  // adds them at Anthropic's list prices (ccusage itself prices 1-hour cache writes at 2x input).
+  const CCUSAGE_PRICING = path.join(__dirname, "ccusage-pricing.json");
+
+  // Local calendar dates: "2026-09-22" (sep "-") or "20260922" (sep "")
+  function dayKey(d, sep = "-") {
+    return [d.getFullYear(), String(d.getMonth() + 1).padStart(2, "0"), String(d.getDate()).padStart(2, "0")].join(sep);
+  }
+  function mondayOf(d) {
+    const m = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    m.setDate(m.getDate() - ((m.getDay() + 6) % 7));
+    return m;
   }
 
-  function runCcusageToday() {
+  // This week Mon→today in one ccusage run: today's numbers (the fields /usage has always had)
+  // plus seven days for the chart; days after today are { future: true }.
+  function summarizeWeek(json, now) {
+    const byDay = new Map((json.daily || []).map((d) => [d.period || d.date, d]));
+    const todayKey = dayKey(now);
+    const monday = mondayOf(now);
+    const unpriced = new Set();
+    const days = [];
+    for (let i = 0; i < 7; i++) {
+      const date = dayKey(new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + i));
+      if (date > todayKey) {
+        days.push({ date, future: true });
+        continue;
+      }
+      const d = byDay.get(date) || {};
+      for (const m of d.modelBreakdowns || []) {
+        const tokens = (m.inputTokens || 0) + (m.outputTokens || 0) + (m.cacheReadTokens || 0) + (m.cacheCreationTokens || 0);
+        if (!m.cost && tokens > 0) unpriced.add(m.modelName); // a model ccusage has no price for
+      }
+      days.push({ date, cost: d.totalCost || 0, tokens: d.totalTokens || 0 });
+    }
+    const t = byDay.get(todayKey) || {};
+    return {
+      source: "ccusage",
+      today: todayKey, // the day these numbers are for (a run can finish after midnight)
+      totalCost: t.totalCost || 0,
+      inputTokens: t.inputTokens || 0,
+      outputTokens: t.outputTokens || 0,
+      cacheReadTokens: t.cacheReadTokens || 0,
+      cacheCreationTokens: t.cacheCreationTokens || 0,
+      models: t.modelsUsed || [],
+      week: {
+        days,
+        totalCost: days.reduce((s, d) => s + (d.cost || 0), 0),
+        totalTokens: days.reduce((s, d) => s + (d.tokens || 0), 0),
+      },
+      unpriced: [...unpriced],
+    };
+  }
+
+  function runCcusageWeek() {
     return new Promise((resolve, reject) => {
       if (!fs.existsSync(CCUSAGE_CLI)) {
         reject(new Error("ccusage not installed"));
         return;
       }
-      const ymd = todayYmd();
-      const args = [CCUSAGE_CLI, "daily", "--json", "--offline", "--since", ymd, "--until", ymd];
+      const now = new Date();
+      const args = [CCUSAGE_CLI, "daily", "--json", "--offline", "--since", dayKey(mondayOf(now), ""), "--until", dayKey(now, "")];
+      // Group days in our own time zone, so ccusage's dates line up with the Mon–Sun we draw
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      if (tz) args.push("--timezone", tz);
+      if (fs.existsSync(CCUSAGE_PRICING)) args.push("--config", CCUSAGE_PRICING);
       let child;
       try {
         const nodeExe = findNodeExe();
@@ -654,18 +1011,7 @@ function startApp() {
       child.on("close", () => {
         clearTimeout(timer);
         try {
-          const json = JSON.parse(out);
-          const t = json.totals || {};
-          const day = (json.daily && json.daily[0]) || {};
-          resolve({
-            source: "ccusage",
-            totalCost: t.totalCost || 0,
-            inputTokens: t.inputTokens || 0,
-            outputTokens: t.outputTokens || 0,
-            cacheReadTokens: t.cacheReadTokens || 0,
-            cacheCreationTokens: t.cacheCreationTokens || 0,
-            models: day.modelsUsed || [],
-          });
+          resolve(summarizeWeek(JSON.parse(out), now));
         } catch (e) {
           reject(new Error("ccusage parse failed: " + (err || e.message).slice(0, 200)));
         }
@@ -749,7 +1095,7 @@ function startApp() {
     usageInFlight = (async () => {
       let data;
       try {
-        data = await runCcusageToday();
+        data = await runCcusageWeek();
       } catch (e) {
         console.warn("[CCPet] ccusage unavailable, falling back:", e.message);
         try {
@@ -759,7 +1105,7 @@ function startApp() {
           data = { error: e2.message };
         }
       }
-      usageCache = { at: Date.now(), data };
+      usageCache = { at: Date.now(), day: data.today || dayKey(new Date()), data };
       usageInFlight = null;
       return data;
     })();
@@ -767,7 +1113,11 @@ function startApp() {
   }
 
   // Clicks are served from the cache (warmed at startup, refreshed in the background)
+  let usageOverride = null; // POST /debug/usage: canned data for checking the chart's edge cases
   async function getUsage() {
+    if (usageOverride && Date.now() < usageOverride.until) return usageOverride.data;
+    // Yesterday's numbers (say, the PC slept overnight) would put "today" on the wrong day
+    if (usageCache.data && usageCache.day !== dayKey(new Date())) return refreshUsage();
     if (usageCache.data && Date.now() - usageCache.at < USAGE_TTL_MS) return usageCache.data;
     if (usageCache.data) {
       refreshUsage(); // stale: return what we have, refresh quietly
@@ -784,26 +1134,36 @@ function startApp() {
   ipcMain.handle("get-usage", () => getUsage());
 
   // ─── Start with Windows ──────────────────────────────
+  // Electron writes `path` into HKCU\...\Run verbatim and never quotes it. Unquoted, a path with a
+  // space ("E:\Vibegaming playground\...\Clawd.exe") makes Windows try "E:\Vibegaming" first: the
+  // day a file by that name appeared (2026-09-17), logon showed "Open with" instead of the pet.
+  // Reads must pass the same quoted string, since openAtLogin is an exact string compare.
+  const LOGIN_ITEM = { path: `"${EXE}"`, args: [] };
   function autoStartSupported() {
     return app.isPackaged && process.platform === "win32";
+  }
+  // registered: our Run value is exactly this exe, quoted
+  // willLaunch: Windows will really run it at logon (also false when disabled in Task Manager)
+  function loginItemState() {
+    try {
+      const s = app.getLoginItemSettings(LOGIN_ITEM);
+      return { registered: !!s.openAtLogin, willLaunch: !!s.executableWillLaunchAtLogin };
+    } catch (e) {
+      return { registered: false, willLaunch: false };
+    }
   }
   function applyAutoStart(enabled) {
     if (!autoStartSupported()) return false;
     try {
-      app.setLoginItemSettings({ openAtLogin: !!enabled, path: process.execPath, args: [] });
+      app.setLoginItemSettings({ openAtLogin: !!enabled, ...LOGIN_ITEM });
       return true;
     } catch (e) {
-      console.error("[CCPet] setLoginItemSettings failed:", e.message);
+      log.error("setLoginItemSettings failed:", e.message);
       return false;
     }
   }
   function autoStartEnabled() {
-    if (!autoStartSupported()) return false;
-    try {
-      return !!app.getLoginItemSettings({ path: process.execPath }).openAtLogin;
-    } catch (e) {
-      return false;
-    }
+    return autoStartSupported() && loginItemState().willLaunch;
   }
   ipcMain.handle("get-autostart", () => ({ supported: autoStartSupported(), enabled: autoStartEnabled() }));
   ipcMain.handle("set-autostart", (event, enabled) => {
@@ -819,14 +1179,14 @@ function startApp() {
     try {
       tray = new Tray(nativeImage.createFromPath(iconPath));
     } catch (e) {
-      console.error("[CCPet] tray failed:", e.message);
+      log.error("tray failed:", e.message);
       return;
     }
     tray.setToolTip("Claw'd — Claude Code pet");
     const rebuild = () => {
       const menu = Menu.buildFromTemplate([
         { label: "💬 Open Claude", click: () => openClaudeApp() },
-        { label: "📊 Today's usage", click: () => sendToRenderer("tray-command", "usage") },
+        { label: "📊 This week's usage", click: () => sendToRenderer("tray-command", "usage") },
         { label: "🚶 Toggle roaming", click: () => sendToRenderer("tray-command", "toggle-roam") },
         { label: "🙈 Hide at screen edge / bring back", click: () => sendToRenderer("tray-command", "toggle-hide") },
         { type: "separator" },
@@ -842,7 +1202,7 @@ function startApp() {
         },
         { type: "separator" },
         { label: "🔄 Restart", click: () => restartApp() },
-        { label: "🚪 Quit", click: () => quitApp() },
+        { label: "🚪 Quit", click: () => quitApp(true) },
       ]);
       tray.setContextMenu(menu);
     };
@@ -851,7 +1211,12 @@ function startApp() {
     tray.on("right-click", rebuild);
   }
 
-  function quitApp() {
+  // byUser: picked Quit from a menu, so the hook watchdog (hooks/notify.js) must not revive the pet
+  function quitApp(byUser = false) {
+    if (byUser && !quitting) {
+      writeWatchdogState({ quitByUser: true });
+      log.info("quit from the menu");
+    }
     quitting = true;
     stopFullscreenWatcher();
     stopCursorHelper();
@@ -868,10 +1233,21 @@ function startApp() {
   function restartApp() {
     quitting = true;
     stopFullscreenWatcher();
+    stopCursorHelper();
     if (httpServer) httpServer.close();
     if (tray) {
       tray.destroy();
       tray = null;
+    }
+    log.info("restarting");
+    clearRunMarker(); // app.exit() skips will-quit
+    // The hook watchdog's throttle stamp: hooks landing in the restart gap won't take it for a crash
+    if (logDir) {
+      try {
+        fs.writeFileSync(path.join(logDir, "revive.stamp"), String(Date.now()));
+      } catch (e) {
+        /* ignore */
+      }
     }
     app.relaunch(); // spawns a fresh instance once this one exits (lock is released by then)
     app.exit(0);
@@ -905,7 +1281,7 @@ function startApp() {
     }
     return screen.getDisplayNearestPoint({ x: cx, y: cy }).workArea;
   });
-  ipcMain.on("quit-app", () => quitApp());
+  ipcMain.on("quit-app", () => quitApp(true));
   ipcMain.on("restart-app", () => restartApp());
 
   // ─── Open / focus the Claude desktop app ─────────────
@@ -917,9 +1293,9 @@ function startApp() {
         "powershell.exe",
         ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script],
         { windowsHide: true, stdio: "ignore" },
-      );
+      ).on("error", (e) => log.warn("open Claude failed:", e.message));
     } catch (e) {
-      console.error("[CCPet] open Claude failed:", e.message);
+      log.warn("open Claude failed:", e.message);
     }
   }
   ipcMain.on("open-claude", () => openClaudeApp());
@@ -998,6 +1374,12 @@ function startApp() {
     trailWindow.on("closed", () => {
       trailWindow = null;
     });
+    // Just decoration: if its renderer dies, drop the window; the next footprint makes a new one
+    const win = trailWindow;
+    win.webContents.on("render-process-gone", (event, details) => {
+      log.warn(`footprint overlay renderer gone (${details.reason}), dropping it`);
+      if (!win.isDestroyed()) win.destroy();
+    });
     return trailWindow;
   }
   ipcMain.on("footprint", (event, fp) => {
@@ -1023,14 +1405,21 @@ function startApp() {
     const script = path.join(__dirname, "scripts", "cursor-helper.ps1");
     if (process.platform !== "win32" || !fs.existsSync(script)) return null;
     try {
-      cursorHelper = spawn(
+      const h = spawn(
         "powershell.exe",
         ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script],
         { windowsHide: true, stdio: ["pipe", "ignore", "ignore"] },
       );
-      cursorHelper.on("exit", () => {
-        cursorHelper = null;
+      const drop = () => {
+        if (cursorHelper === h) cursorHelper = null;
+      };
+      h.on("exit", drop);
+      h.on("error", (e) => {
+        log.warn("cursor helper error:", e.message);
+        drop();
       });
+      h.stdin.on("error", drop); // EPIPE when writing to a helper that just died
+      cursorHelper = h;
     } catch (e) {
       cursorHelper = null;
     }
@@ -1128,9 +1517,65 @@ function startApp() {
   app.commandLine.appendSwitch("disable-gpu");
   app.disableHardwareAcceleration();
 
+  // Clawd.exe launched again (shortcut, Run key, the hook watchdog): make sure the pet is really
+  // there, instead of the lock silently swallowing the launch
   app.on("second-instance", () => {
-    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
+    log.info("launched again while running: making sure the pet is visible");
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      createWindow();
+      return;
+    }
+    if (mainWindow.webContents.isCrashed()) {
+      rendererDeaths.length = 0; // a manual relaunch skips the crash back-off
+      recoverRenderer({ reason: "found dead on relaunch" });
+      return;
+    }
+    if (!isOnScreen(mainWindow.getBounds())) {
+      placeAtHome();
+      mainWindow.webContents.reload(); // resync the renderer's idea of where it is
+    }
+    mainWindow.showInactive();
   });
+
+  // GPU / utility process deaths (Chromium restarts them); kept for the post-mortem
+  app.on("child-process-gone", (event, details) => {
+    log.warn(`${details.type} process gone (${details.reason}, exit code ${details.exitCode})`);
+  });
+
+  // ─── Self-check (GET /health, hourly heartbeat) ──────
+  function healthReport() {
+    const metrics = app.getAppMetrics();
+    const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+    return {
+      pid: process.pid,
+      version: app.getVersion(),
+      exe: EXE,
+      startedAt,
+      uptimeSec: Math.round(process.uptime()),
+      window: win && {
+        visible: win.isVisible(),
+        rendererAlive: !win.webContents.isCrashed(),
+        onScreen: isOnScreen(win.getBounds()),
+        bounds: win.getBounds(),
+      },
+      rendererRecoveries,
+      fullscreenWatcher: !!fsWatcher,
+      autoStart: autoStartSupported() ? { wanted: loadConfig().autoStart !== false, ...loginItemState() } : null,
+      config: loadConfig(), // the real file: callers inside an MSIX container may see a stale copy
+      container, // non-null: stuck inside another app's MSIX container (virtualized %APPDATA%)
+      memoryMB: Math.round(metrics.reduce((s, m) => s + m.memory.workingSetSize, 0) / 1024),
+      processes: metrics.length,
+      logDir,
+    };
+  }
+  function heartbeat() {
+    const metrics = app.getAppMetrics();
+    const mb = Math.round(metrics.reduce((s, m) => s + m.memory.workingSetSize, 0) / 1024);
+    log.info(
+      `alive ${(process.uptime() / 3600).toFixed(1)}h, ${mb} MB in ${metrics.length} processes, ` +
+        `renderer recoveries ${rendererRecoveries}`,
+    );
+  }
 
   app.whenReady().then(() => {
     createWindow();
@@ -1141,13 +1586,25 @@ function startApp() {
     createTrailWindow(); // pre-create so the first footprint isn't lost while it loads
     startUsagePrefetch();
 
-    // Start with Windows: default ON for the packaged app, remembered in config
+    // Start with Windows: default ON for the packaged app, remembered in config. The Run value is
+    // only rewritten when missing or stale (exe moved, old unquoted value): a correct entry is left
+    // alone, so a "Disable" in Task Manager sticks.
     if (autoStartSupported()) {
       const cfg = loadConfig();
       const want = cfg.autoStart !== false;
-      applyAutoStart(want);
+      const before = loginItemState();
+      if (!want || !before.registered) applyAutoStart(want);
       if (cfg.autoStart === undefined) saveConfig({ autoStart: want });
+      const now = loginItemState();
+      const fixed = want && !before.registered ? " (Run value rewritten)" : "";
+      log.info(`start with Windows: wanted=${want} registered=${now.registered} willLaunch=${now.willLaunch}${fixed}`);
+      if (want && !now.willLaunch) {
+        log.warn("start with Windows is on, but Windows won't launch the pet at logon (disabled in Task Manager?)");
+      }
     }
+
+    setInterval(touchRunMarker, 10 * 60 * 1000); // brackets the time of death if we get killed
+    setInterval(heartbeat, 60 * 60 * 1000); // memory trend, for leaks
 
     // Writing ~/.claude/settings.json is a global change — opt-in only (CCPET_AUTOCONFIG=1)
     if (process.env.CCPET_AUTOCONFIG === "1") {
@@ -1164,6 +1621,11 @@ function startApp() {
   app.on("before-quit", () => {
     quitting = true;
     stopFullscreenWatcher();
+  });
+
+  app.on("will-quit", () => {
+    log.info("quit");
+    clearRunMarker();
   });
 
   app.on("activate", () => {

@@ -53,6 +53,13 @@ public static class FSW {
 }
 "@
 
+# Exit together with the pet: if Clawd is killed (taskkill /F, crash) nobody reads our output
+# any more, and this loop would otherwise keep polling forever as an orphan.
+$parentProc = $null
+if ($SelfPid -ne 0) {
+    try { $parentProc = [System.Diagnostics.Process]::GetProcessById($SelfPid) } catch { exit 0 }
+}
+
 $ignoreClasses = @("Progman", "WorkerW", "Shell_TrayWnd", "Windows.UI.Core.CoreWindow")
 $lastFs = -1
 $lastWin = ""
@@ -66,6 +73,7 @@ function Rect-Info($h) {
 }
 
 while ($true) {
+    try { if ($parentProc -and $parentProc.HasExited) { break } } catch { }
     $fs = 0
     $fgInfo = $null
     try {

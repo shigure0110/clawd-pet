@@ -1,0 +1,26 @@
+{
+  "$schema": "https://ccusage.com/config-schema.json",
+  "defaults": {
+    "pricingOverrides": {
+      "claude-fable-5-1": {
+        "inputCostPerToken": 1e-5,
+        "outputCostPerToken": 5e-5,
+        "cacheCreationInputTokenCost": 1.25e-5,
+        "cacheReadInputTokenCost": 2.5e-7
+      },
+      "claude-fable-5": {
+        "inputCostPerToken": 1e-5,
+        "outputCostPerToken": 5e-5,
+        "cacheCreationInputTokenCost": 1.25e-5,
+        "cacheReadInputTokenCost": 1e-6
+      },
+      "claude-opus-5-5": {
+        "inputCostPerToken": 4e-6,
+        "outputCostPerToken": 2e-5,
+        "cacheCreationInputTokenCost": 5e-6,
+        "cacheReadInputTokenCost": 2e-7,
+        "fastMultiplier": 2
+      }
+    }
+  }
+}

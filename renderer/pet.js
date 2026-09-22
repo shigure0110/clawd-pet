@@ -108,6 +108,7 @@ let lastStealAt = 0;
 let dragSamples = [];
 
 function openClaude(engine) {
+  closeUsageCard();
   engine.applyState("waving");
   showSpeech("Opening Claude 💬", 1500);
   if (window.ccPet && window.ccPet.openClaude) window.ccPet.openClaude();
@@ -197,8 +198,14 @@ function spawnParticles(clientX, clientY, onlyIndex) {
 // ── Speech bubble ──────────────────────────────────────────
 
 let speechTimer = null;
+let liveSpeech = null; // the bubble on screen now: { text } | { typing }, with its end time
 
 function showSpeech(text, durationMs) {
+  if (usageCard) {
+    // The card the user asked for stays on top; the newest bubble shows once it closes
+    deferredSpeech = text ? { text, until: Date.now() + durationMs } : null;
+    return;
+  }
   const bubble = document.getElementById("pet-speech-bubble");
   const bubbleText = bubble ? bubble.querySelector(".bubble-text") : null;
   if (!bubble || !bubbleText) return;
@@ -211,10 +218,12 @@ function showSpeech(text, durationMs) {
 
   if (!text || hiddenMode) {
     bubble.classList.remove("show-bubble");
+    liveSpeech = null;
     return;
   }
   bubbleText.textContent = text;
   bubble.classList.add("show-bubble");
+  liveSpeech = { text, until: Date.now() + durationMs };
   if (window.__petDebug) {
     const r = bubble.getBoundingClientRect();
     const cs = getComputedStyle(bubble);
@@ -226,10 +235,15 @@ function showSpeech(text, durationMs) {
   speechTimer = setTimeout(() => {
     bubble.classList.remove("show-bubble");
     speechTimer = null;
+    liveSpeech = null;
   }, durationMs);
 }
 
 function showTyping(durationMs) {
+  if (usageCard) {
+    deferredSpeech = { typing: true, until: Date.now() + durationMs };
+    return;
+  }
   const bubble = document.getElementById("pet-speech-bubble");
   const bubbleText = bubble ? bubble.querySelector(".bubble-text") : null;
   if (!bubble) return;
@@ -239,6 +253,7 @@ function showTyping(durationMs) {
   }
   if (hiddenMode) {
     bubble.classList.remove("show-bubble");
+    liveSpeech = null;
     return;
   }
   if (bubbleText) bubbleText.textContent = "";
@@ -249,11 +264,13 @@ function showTyping(durationMs) {
     bubble.appendChild(typing);
   }
   bubble.classList.add("show-bubble");
+  liveSpeech = { typing: true, until: Date.now() + durationMs };
   speechTimer = setTimeout(() => {
     bubble.classList.remove("show-bubble");
     const t = bubble.querySelector(".bubble-typing");
     if (t) t.remove();
     speechTimer = null;
+    liveSpeech = null;
   }, durationMs);
 }
 
@@ -305,20 +322,29 @@ function stateForStatus() {
 
 // ── Usage: today's tokens + API-equivalent cost ───────────
 
+// 1.5M, 2B (never "2.0B")
 function formatTokens(n) {
   if (!n) return "0";
-  if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
-  if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
+  const short = (v, unit) => v.toFixed(1).replace(/\.0$/, "") + unit;
+  if (n >= 1e9) return short(n / 1e9, "B");
+  if (n >= 1e6) return short(n / 1e6, "M");
+  if (n >= 1e3) return short(n / 1e3, "K");
   return String(n);
 }
 
+const USAGE_LOADING = "Checking the books… 🦀";
+
 async function showUsage(engine) {
   engine.applyState("waving");
-  showSpeech("Checking the books… 🦀", 999999);
+  // A sticky bubble on screen (a permission request, typing dots) comes back when the card closes
+  const resume = !usageCard && liveSpeech && liveSpeech.until > Date.now() ? liveSpeech : null;
+  if (!usageCard) showSpeech(USAGE_LOADING, 999999);
   try {
     const u = await window.ccPet.getUsage();
     if (!u || u.error) {
       showSpeech("Couldn't read today's usage 🤔", 3000);
+    } else if (u.week && Array.isArray(u.week.days) && u.week.days.length === 7) {
+      openUsageCard(u, resume);
     } else {
       const inTok = (u.inputTokens || 0) + (u.cacheCreationTokens || 0);
       const all = (u.models || []).map((m) => m.replace(/^claude-/, ""));
@@ -336,6 +362,235 @@ async function showUsage(engine) {
   setTimeout(() => {
     if (engine.currentState === "waving") engine.applyState(stateForStatus());
   }, 2600);
+}
+
+// ── Usage card: this week's cost curve over tokens per day ──
+// Two small charts on one Mon–Sun axis (never two y-scales on one plot). Only the week's peak
+// is labelled; hovering a day puts its numbers in the header. Speech bubbles that arrive while
+// the card is up wait (deferredSpeech) and show once it closes.
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+const DAY_ABBR = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const UC = {
+  w: 264, // plot width; the card adds 2×8px padding + 2×2px border
+  h: 98,
+  costTop: 12,
+  costBase: 52,
+  tokTop: 64,
+  tokBase: 84,
+  labelY: 96,
+  barW: 12,
+  showMs: 12000,
+  afterHoverMs: 4000,
+};
+let usageCard = null; // { el, hideTimer }
+let deferredSpeech = null; // newest bubble that arrived while the card was up
+
+function svgEl(tag, attrs, text) {
+  const el = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, String(v));
+  if (text != null) el.textContent = text;
+  return el;
+}
+
+// 1, 2, 2.5, 5 × 10^k at or above v: the one gridline sits on a round number
+function niceCeil(v) {
+  if (!(v > 0)) return 1;
+  const p = 10 ** Math.floor(Math.log10(v));
+  for (const m of [1, 2, 2.5, 5, 10]) if (v <= m * p * 1.0000001) return m * p;
+  return 10 * p;
+}
+
+function formatMoney(v) {
+  return "$" + v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+function formatMoneyShort(v) {
+  if (v >= 1e4) return "$" + Math.round(v / 1e3) + "K";
+  if (v >= 1e3) return "$" + (v / 1e3).toFixed(1).replace(/\.0$/, "") + "K";
+  if (v >= 10) return "$" + Math.round(v);
+  return "$" + v.toFixed(2);
+}
+
+function dayLabel(day, i) {
+  return `${DAY_ABBR[i]} ${Number(day.date.slice(8))}`;
+}
+
+function renderUsageCard(el, u) {
+  const days = u.week.days;
+  const firstFuture = days.findIndex((d) => d.future);
+  const todayIdx = firstFuture === -1 ? 6 : Math.max(0, firstFuture - 1);
+  const slot = UC.w / 7;
+  const cx = (i) => slot * (i + 0.5);
+  const past = days.slice(0, todayIdx + 1);
+  // Headroom: the peak stays under ~85% of the top, so its label always fits above the dot
+  const costMax = niceCeil(Math.max(...past.map((d) => d.cost || 0)) / 0.85);
+  const tokMax = niceCeil(Math.max(...past.map((d) => d.tokens || 0)));
+  const yCost = (v) => UC.costBase - ((v || 0) / costMax) * (UC.costBase - UC.costTop);
+  const peakIdx = past.reduce((best, d, i) => ((d.cost || 0) > (past[best].cost || 0) ? i : best), 0);
+
+  el.textContent = "";
+  const head = document.createElement("div");
+  head.className = "uc-head";
+  const week = document.createElement("div");
+  week.className = "uc-week";
+  const label = document.createElement("span");
+  label.className = "uc-label";
+  label.textContent = "This week";
+  const total = document.createElement("span");
+  total.className = "uc-total";
+  total.textContent = formatMoney(u.week.totalCost || 0);
+  week.append(label, total);
+  const focus = document.createElement("div");
+  focus.className = "uc-focus";
+  head.append(week, focus);
+
+  const svg = svgEl("svg", { width: UC.w, height: UC.h, viewBox: `0 0 ${UC.w} ${UC.h}`, class: "uc-chart" });
+  // One recessive gridline per panel, labelled with its round top value; it moves to the left
+  // edge when the peak sits on the right, so the two labels never meet
+  const gridAnchorLeft = peakIdx >= 4;
+  const gridLabelX = gridAnchorLeft ? 0 : UC.w;
+  const anchor = gridAnchorLeft ? "start" : "end";
+  svg.append(
+    svgEl("line", { x1: 0, x2: UC.w, y1: UC.costTop, y2: UC.costTop, class: "uc-grid" }),
+    svgEl("line", { x1: 0, x2: UC.w, y1: UC.costBase, y2: UC.costBase, class: "uc-axis" }),
+    svgEl("line", { x1: 0, x2: UC.w, y1: UC.tokTop, y2: UC.tokTop, class: "uc-grid" }),
+    svgEl("line", { x1: 0, x2: UC.w, y1: UC.tokBase, y2: UC.tokBase, class: "uc-axis" }),
+  );
+
+  // Crosshair for the hovered day (drawn under the marks)
+  const cross = svgEl("line", { x1: 0, x2: 0, y1: UC.costTop, y2: UC.tokBase, class: "uc-cross", visibility: "hidden" });
+  svg.append(cross);
+
+  // Tokens: thin columns rounded at the top, square on the baseline; today in the full hue
+  past.forEach((d, i) => {
+    if (!d.tokens) return;
+    const h = Math.max(1.5, (d.tokens / tokMax) * (UC.tokBase - UC.tokTop));
+    const x = cx(i) - UC.barW / 2;
+    const r = Math.min(3, h, UC.barW / 2);
+    const top = UC.tokBase - h;
+    svg.append(
+      svgEl("path", {
+        d: `M${x},${UC.tokBase} V${top + r} Q${x},${top} ${x + r},${top} H${x + UC.barW - r} Q${x + UC.barW},${top} ${x + UC.barW},${top + r} V${UC.tokBase} Z`,
+        class: i === todayIdx ? "uc-bar uc-today" : "uc-bar",
+      }),
+    );
+  });
+
+  // Cost: a wash under a 2px line through Mon→today, one ringed dot per day
+  const pts = past.map((d, i) => [cx(i), yCost(d.cost)]);
+  if (pts.length > 1) {
+    const line = pts.map(([x, y], i) => `${i ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
+    svg.append(
+      svgEl("path", { d: `${line} L${pts[pts.length - 1][0].toFixed(1)},${UC.costBase} L${pts[0][0].toFixed(1)},${UC.costBase} Z`, class: "uc-area" }),
+      svgEl("path", { d: line, class: "uc-line" }),
+    );
+  }
+  pts.forEach(([x, y], i) => svg.append(svgEl("circle", { cx: x, cy: y, r: i === todayIdx ? 5 : 4, class: "uc-dot" })));
+  if ((past[peakIdx].cost || 0) > 0) {
+    const [px, py] = pts[peakIdx];
+    const x = Math.min(UC.w - 14, Math.max(14, px));
+    svg.append(svgEl("text", { x, y: Math.max(10, py - 8), "text-anchor": "middle", class: "uc-value" }, formatMoneyShort(past[peakIdx].cost)));
+  }
+
+  // Scale labels last, haloed (CSS), so no dot or line can cover them; a panel with no data
+  // gets none rather than an invented "$1/day"
+  if (past.some((d) => d.cost > 0)) {
+    svg.append(svgEl("text", { x: gridLabelX, y: UC.costTop - 3, "text-anchor": anchor, class: "uc-tick" }, `${formatMoneyShort(costMax)}/day`));
+  }
+  if (past.some((d) => d.tokens > 0)) {
+    svg.append(svgEl("text", { x: gridLabelX, y: UC.tokTop - 3, "text-anchor": anchor, class: "uc-tick" }, `${formatTokens(tokMax)} tok`));
+  }
+
+  // Day labels: today strong, days still to come muted
+  days.forEach((d, i) => {
+    const cls = i === todayIdx ? "uc-day uc-day-today" : d.future ? "uc-day uc-day-future" : "uc-day";
+    svg.append(svgEl("text", { x: cx(i), y: UC.labelY, "text-anchor": "middle", class: cls }, DAY_ABBR[i]));
+  });
+
+  // Hover: the whole day column is the target; the header shows that day, the crosshair marks it
+  const showDay = (i) => {
+    const d = days[i];
+    focus.textContent = d.future
+      ? `${dayLabel(d, i)} · not yet`
+      : `${i === todayIdx ? "Today" : dayLabel(d, i)} · ${formatMoney(d.cost || 0)} · ${formatTokens(d.tokens || 0)} tok`;
+    cross.setAttribute("x1", cx(i));
+    cross.setAttribute("x2", cx(i));
+  };
+  days.forEach((d, i) => {
+    const hit = svgEl("rect", { x: i * slot, y: 0, width: slot, height: UC.h, class: "uc-hit" });
+    hit.addEventListener("pointerenter", () => {
+      showDay(i);
+      cross.setAttribute("visibility", "visible");
+    });
+    svg.append(hit);
+  });
+  svg.addEventListener("pointerleave", () => {
+    showDay(todayIdx);
+    cross.setAttribute("visibility", "hidden");
+  });
+  showDay(todayIdx);
+
+  el.append(head, svg);
+  if (Array.isArray(u.unpriced) && u.unpriced.length) {
+    const note = document.createElement("div");
+    note.className = "uc-note";
+    // One line whatever the count (the card must stay inside the window); full list on hover
+    const names = u.unpriced.map((m) => String(m).replace(/^claude-/, ""));
+    note.textContent = `⚠ ${names.length} model${names.length > 1 ? "s" : ""} not priced, counted as $0: ${names.join(", ")}`;
+    note.title = names.join(", ");
+    el.append(note);
+  }
+  el.setAttribute(
+    "aria-label",
+    `This week ${formatMoney(u.week.totalCost || 0)}; ` +
+      past.map((d, i) => `${DAY_ABBR[i]} ${formatMoney(d.cost || 0)}, ${formatTokens(d.tokens || 0)} tokens`).join("; "),
+  );
+}
+
+function scheduleUsageCardHide(ms) {
+  if (!usageCard) return;
+  clearTimeout(usageCard.hideTimer);
+  usageCard.hideTimer = setTimeout(closeUsageCard, ms);
+}
+
+function openUsageCard(u, resume) {
+  if (hiddenMode) return; // tucked away at the edge: nowhere to show it
+  if (!usageCard) {
+    // A status bubble that replaced "Checking the books…" while loading is newer than `resume`
+    const newer = liveSpeech && liveSpeech.text !== USAGE_LOADING && liveSpeech.until > Date.now() ? liveSpeech : null;
+    showSpeech("", 0);
+    deferredSpeech = newer || resume || null;
+    const el = document.createElement("div");
+    el.id = "usage-card";
+    el.setAttribute("role", "img");
+    el.addEventListener("pointerenter", () => usageCard && clearTimeout(usageCard.hideTimer));
+    el.addEventListener("pointerleave", () => scheduleUsageCardHide(UC.afterHoverMs));
+    el.addEventListener("click", () => closeUsageCard());
+    document.getElementById("pet-stage").appendChild(el);
+    usageCard = { el, hideTimer: null };
+  }
+  try {
+    renderUsageCard(usageCard.el, u);
+  } catch (e) {
+    console.warn("[CCPet] usage card failed:", e);
+    closeUsageCard();
+    showSpeech(`This week ≈ ${formatMoney((u.week && u.week.totalCost) || 0)}`, 5000);
+    return;
+  }
+  scheduleUsageCardHide(UC.showMs);
+}
+
+function closeUsageCard() {
+  if (!usageCard) return;
+  clearTimeout(usageCard.hideTimer);
+  usageCard.el.remove();
+  usageCard = null;
+  const d = deferredSpeech;
+  deferredSpeech = null;
+  if (d && d.until > Date.now()) {
+    if (d.typing) showTyping(d.until - Date.now());
+    else showSpeech(d.text, d.until - Date.now());
+  }
 }
 
 // ── Roaming: walk the bottom edge, climb walls, fall, tuck away ──
@@ -868,7 +1123,7 @@ async function climbWall(side, wa) {
 async function attemptStroll() {
   strollTimer = null;
   if (!roamEnabled || hiddenMode || sleepStage || petting) return;
-  const busy = isDragging || menuOpen || currentCCStatus !== "idle";
+  const busy = isDragging || menuOpen || usageCard || currentCCStatus !== "idle"; // stay put under the card
   const stateOk = engineRef && (engineRef.currentState === "idle" || engineRef.currentState === "review");
   if (busy || !stateOk) {
     scheduleStroll(8000);
@@ -973,6 +1228,7 @@ async function enterHide() {
   if (!wa) return;
   const wasClimbing = !!climbSide;
   cancelStroll(false); // still allowed to drop us here: hiddenMode isn't set yet
+  closeUsageCard(); // a fullscreen app (slideshow, game) just came up: nothing stays on screen
   hiddenMode = true;
   showSpeech("", 0);
   const groundY = groundYOf(wa);
@@ -1219,6 +1475,7 @@ async function openImportDialog(engine) {
 // ── Menu actions (native context menu + tray) ──────────────
 
 async function runMenuAction(engine, action) {
+  if (action !== "usage") closeUsageCard(); // its confirmation bubble must show now, not after the card
   switch (action) {
     case "usage":
       showUsage(engine);
@@ -1589,8 +1846,9 @@ function main() {
       else if (!manualHide) exitHide();
     });
     window.ccPet.onTrayCommand((cmd) => {
-      if (cmd === "usage") showUsage(engine);
-      else if (cmd === "toggle-roam") toggleRoam();
+      if (cmd === "usage") return showUsage(engine);
+      closeUsageCard();
+      if (cmd === "toggle-roam") toggleRoam();
       else if (cmd === "toggle-hide") toggleHide();
     });
     window.ccPet.onMenuAction((action) => runMenuAction(engine, action));
