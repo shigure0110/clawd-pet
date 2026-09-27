@@ -36,7 +36,7 @@ Rows 0–21 are the original set (idle, walking, waving, jumping, typing, snacks
 
 | Trigger | What it does |
 | --- | --- |
-| Idle | strolls (long walks turn side-on into a trot), climbs walls, snacks (coffee / water / fries / sausage by time of day), smells a flower, doomscrolls; its eyes follow the cursor when it comes near |
+| Idle | strolls sideways like a proper crab, climbs walls, snacks (coffee / water / fries / sausage by time of day), smells a flower, doomscrolls; its eyes follow the cursor when it comes near |
 | 2.5 / 3 / 8 min without input | yawns, dozes off, then sleeps with a nightcap |
 | Input returns | wakes with a stretch and a time-of-day greeting |
 | 50 min of activity | stretch-break reminder |
