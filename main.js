@@ -34,6 +34,22 @@ function startApp() {
   const AdmZip = require("adm-zip");
   const util = require("util");
 
+  // Dev instance (QA): CLAWD_USER_DATA gives it its own profile. The single-instance lock is keyed
+  // on userData, so this must happen before the lock, or the dev copy would just ping the live pet.
+  if (process.env.CLAWD_USER_DATA) app.setPath("userData", path.resolve(process.env.CLAWD_USER_DATA));
+  // CLAWD_PORT marks a dev instance: its own port, parked off-screen, mischief and roaming off
+  const IS_DEV = !!process.env.CLAWD_PORT;
+  if (IS_DEV) {
+    // A dev copy without its own profile would share the live pet's userData, lose the lock and
+    // poke the live pet ("launched again"); 31126 or a junk port would collide with it too
+    const p = Number(process.env.CLAWD_PORT);
+    if (!process.env.CLAWD_USER_DATA || !Number.isInteger(p) || p < 1024 || p > 65535 || p === 31126) {
+      console.error("[clawd] a dev instance needs CLAWD_USER_DATA and a CLAWD_PORT (1024-65535) other than 31126");
+      app.exit(1);
+      return;
+    }
+  }
+
   // Only one Claw'd at a time (matters with auto-start)
   if (!app.requestSingleInstanceLock()) {
     app.quit();
@@ -56,10 +72,13 @@ function startApp() {
   const LOG_MAX_BYTES = 1024 * 1024; // then rotated to clawd.old.log
   const logDir = resolveLogDir();
   function resolveLogDir() {
-    const dirs = [
-      app.isPackaged ? path.join(path.dirname(EXE), "logs") : path.join(__dirname, "logs"),
-      path.join(app.getPath("userData"), "logs"),
-    ];
+    // A dev instance with its own profile logs there, away from the repo's logs\ (running.json)
+    const dirs = process.env.CLAWD_USER_DATA
+      ? [path.join(app.getPath("userData"), "logs")]
+      : [
+          app.isPackaged ? path.join(path.dirname(EXE), "logs") : path.join(__dirname, "logs"),
+          path.join(app.getPath("userData"), "logs"),
+        ];
     for (const dir of dirs) {
       try {
         fs.mkdirSync(dir, { recursive: true });
@@ -226,7 +245,7 @@ function startApp() {
   let fsWatcher = null;
   let fullscreenActive = false;
   let quitting = false;
-  const PORT = 31126;
+  const PORT = Number(process.env.CLAWD_PORT) || 31126;
 
   const STATUS = {
     IDLE: "idle",
@@ -238,6 +257,7 @@ function startApp() {
 
   let currentStatus = STATUS.IDLE;
   let statusMessage = "";
+  let statusSource = { sessionId: "", event: "" }; // the hook that set the current status
   let prevStatus = STATUS.IDLE;
   let completedTimer = null;
   let runningSince = 0; // when we entered "running" — short chatty turns don't notify
@@ -290,7 +310,8 @@ function startApp() {
       maxWidth: WIN_W,
       minHeight: WIN_H,
       maxHeight: WIN_H,
-      x: Math.round(screenWidth - WIN_W),
+      // The dev instance starts parked off the left edge, out of the user's way
+      x: IS_DEV ? -320 : Math.round(screenWidth - WIN_W),
       y: Math.round(screenHeight - WIN_H),
 
       title: " ",
@@ -310,10 +331,16 @@ function startApp() {
         contextIsolation: true,
         nodeIntegration: false,
         zoomFactor: 1,
+        // Dev: the preload reads --clawd-dev; off-screen, the page keeps its timers running
+        additionalArguments: IS_DEV ? ["--clawd-dev"] : [],
+        backgroundThrottling: !IS_DEV,
       },
     });
 
     mainWindow.setMenuBarVisibility(false);
+    // A file dropped on the pet is eaten (renderer), never navigated to
+    mainWindow.webContents.on("will-navigate", (e) => e.preventDefault());
+    mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
     mainWindow.setTitle(" ");
     mainWindow.setAlwaysOnTop(true, "screen-saver");
     mainWindow.setBackgroundColor("#00000000");
@@ -423,19 +450,28 @@ function startApp() {
   }
 
   // ─── Status pipeline ─────────────────────────────────
-  function pushStatus(status, message = "") {
-    if (status === currentStatus && message === statusMessage) return;
+  // source: { sessionId, event } of the hook behind it. The renderer's director lets only the focus
+  // session drive rows; the reverts below keep the source so a background session's revert stays
+  // in the background too.
+  function pushStatus(status, message = "", source = null) {
+    // Same status and text from another session (or another event) still goes to the renderer:
+    // the director needs its sessionId / event to track the focus session
+    const srcId = source ? source.sessionId || "" : statusSource.sessionId;
+    const srcEvent = source ? source.event || "" : "revert";
+    if (status === currentStatus && message === statusMessage && srcId === statusSource.sessionId && srcEvent === statusSource.event) return;
 
     prevStatus = currentStatus;
     currentStatus = status;
     statusMessage = message;
+    const src = source || { sessionId: statusSource.sessionId, event: "revert" };
+    statusSource = { sessionId: src.sessionId || "", event: src.event || "" };
 
     if (completedTimer) {
       clearTimeout(completedTimer);
       completedTimer = null;
     }
 
-    sendToRenderer("status-update", { status, message });
+    sendToRenderer("status-update", { status, message, sessionId: statusSource.sessionId, event: statusSource.event });
 
     if (status === STATUS.RUNNING && prevStatus !== STATUS.RUNNING) {
       runningSince = Date.now();
@@ -454,9 +490,11 @@ function startApp() {
       }, 15000);
     }
 
-    if (status === STATUS.COMPLETED && prevStatus !== STATUS.COMPLETED) {
+    // The notifications fire on the change only; the revert timer is re-armed on every push (the
+    // push above cleared it: a second session's identical completed must not leave main stuck)
+    if (status === STATUS.COMPLETED) {
       // Only runs longer than 15s get a system notification — quick chat turns stay quiet
-      if (runningSince && Date.now() - runningSince > 15000) {
+      if (prevStatus !== STATUS.COMPLETED && runningSince && Date.now() - runningSince > 15000) {
         sendNotification("🦀 Ready to move on", message || "Claude finished this turn — go take a look");
       }
       completedTimer = setTimeout(() => {
@@ -465,8 +503,8 @@ function startApp() {
         }
       }, 10000);
     }
-    if (status === STATUS.ERROR && prevStatus !== STATUS.ERROR) {
-      sendNotification("🦀 Claude hit an error", message || "Something went wrong");
+    if (status === STATUS.ERROR) {
+      if (prevStatus !== STATUS.ERROR) sendNotification("🦀 Claude hit an error", message || "Something went wrong");
       completedTimer = setTimeout(() => {
         if (currentStatus === STATUS.ERROR) {
           pushStatus(STATUS.IDLE, "");
@@ -476,6 +514,10 @@ function startApp() {
   }
 
   function sendNotification(title, body) {
+    if (IS_DEV) {
+      log.info(`(dev) system notification suppressed: ${title}`); // a QA run must not pop toasts
+      return;
+    }
     try {
       if (Notification.isSupported()) {
         new Notification({ title, body }).show();
@@ -523,7 +565,7 @@ function startApp() {
   }
 
   // ─── Concurrent Claude Code sessions (from hook payloads) ──
-  const sessions = new Map(); // session_id → { cwd, name, lastSeen }
+  const sessions = new Map(); // session_id → { cwd, name, lastSeen, status }
 
   function sessionSummary() {
     return {
@@ -533,10 +575,12 @@ function startApp() {
         .filter(Boolean),
     };
   }
+  // The renderer also gets the ids (never GET /status, which any page can read): it drops the
+  // prompt row / bubbles of a session that is gone
   function broadcastSessions() {
-    sendToRenderer("sessions-update", sessionSummary());
+    sendToRenderer("sessions-update", { ...sessionSummary(), ids: Array.from(sessions.keys()) });
   }
-  function touchSession(id, cwd, event) {
+  function touchSession(id, cwd, event, status) {
     if (!id) return;
     if (event === "SessionEnd") {
       if (sessions.delete(id)) broadcastSessions();
@@ -546,10 +590,91 @@ function startApp() {
     const before = sessions.size;
     sessions.set(id, {
       cwd: cwd || prev.cwd || "",
-      name: cwd ? path.basename(cwd) : prev.name || "",
+      name: cwd ? path.basename(cwd).slice(0, 64) : prev.name || "",
       lastSeen: Date.now(),
+      status: status || prev.status || "",
     });
     if (sessions.size !== before) broadcastSessions();
+  }
+  // Another session is mid-run (running / waiting, heard from within 5 min)
+  function otherSessionBusy(id) {
+    const cutoff = Date.now() - 5 * 60 * 1000;
+    for (const [sid, s] of sessions) {
+      if (sid !== id && (s.status === STATUS.RUNNING || s.status === STATUS.WAITING) && s.lastSeen >= cutoff) return true;
+    }
+    return false;
+  }
+
+  // ─── Hook events for the renderer's reactions (spec §4.6) ──
+  // The reaction tags hooks/notify.js adds to its POST (Gate 3). Every one is optional: today's
+  // notify.js sends none of them, and then the renderer plays no hook reaction at all (`rich`
+  // false), so the pet behaves exactly as before. Values are short tags; anything else is dropped.
+  const HOOK_TAG_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
+  const hookTag = (v) => (typeof v === "string" && HOOK_TAG_RE.test(v) ? v : "");
+  const HOOK_TAG_FIELDS = ["event", "tool", "kind", "cmd", "verdict", "source", "ntype", "mode", "toolUseId"];
+  // The identity fields of one POST, normalized once: the hook-event, the sessions map and the
+  // status-update all key the session the same way (any local page can POST junk here)
+  function hookIdentity(q) {
+    const sessionId = typeof q.sessionId === "string" ? q.sessionId.slice(0, 128) : "";
+    const event = hookTag(q.event);
+    const cwd = typeof q.cwd === "string" ? q.cwd.slice(0, 1024) : "";
+    const project = cwd ? path.basename(cwd).slice(0, 64) : "";
+    return { sessionId, event, cwd, project };
+  }
+  function hookEventOf(p, injected) {
+    const q = p && typeof p === "object" ? p : {};
+    const id = hookIdentity(q);
+    const ev = {};
+    for (const k of HOOK_TAG_FIELDS) ev[k] = hookTag(q[k]);
+    ev.ok = typeof q.ok === "boolean" ? q.ok : null;
+    ev.limit = q.limit === true;
+    ev.sessionId = id.sessionId;
+    ev.project = id.project;
+    ev.ts = Date.now();
+    // Gate 3's notify always sends `kind` ("" outside tool events); injected QA events count too
+    ev.rich = !!injected || Object.prototype.hasOwnProperty.call(q, "kind");
+    if (injected) {
+      ev.injected = true;
+      // QA extras (injected only): pretend Claude Code was quiet this long before the hook (H12),
+      // or that the run started this long ago (H18 variants, H20 work hats)
+      for (const k of ["qaIdleMs", "qaRunMs"]) if (Number.isFinite(q[k]) && q[k] >= 0) ev[k] = Math.min(q[k], 24 * 3600 * 1000);
+    }
+    return ev;
+  }
+
+  // One hook's status (POST /status, or /debug/hook with a status). A SessionStart / SessionEnd
+  // idle is not pushed while another session is mid-run, so opening a new session no longer
+  // flips a working crab to idle. false = not a valid status.
+  // `hook`: { injected } sends the hook-event to the renderer after touchSession and before the
+  // status (the renderer handles the hook first, then the status respects what it started).
+  function ingestStatus(p, hook) {
+    const q = p && typeof p === "object" ? p : {};
+    const { status } = q;
+    const { sessionId, cwd, event, project } = hookIdentity(q);
+    let message = typeof q.message === "string" ? q.message : "";
+    // Claude Code's idle reminder ("Claude is waiting for your input") arrives as waiting: that
+    // session is idle, not busy. Gate 3's notify names it (ntype); the text is the fallback.
+    const idleReminder = status === STATUS.WAITING && (q.ntype === "idle_prompt" || /waiting for your input/i.test(message));
+    touchSession(sessionId, cwd, event, idleReminder ? STATUS.IDLE : status);
+    // With several sessions running, tag live bubbles with the project name
+    if (sessions.size >= 2 && project && message && (status === "running" || status === "waiting")) {
+      message = `[${project}] ${message}`;
+    }
+    if (!Object.values(STATUS).includes(status)) return false;
+    // (also while the guard below holds the status back: the hook itself still happened)
+    if (hook) sendToRenderer("hook-event", hookEventOf(q, hook.injected));
+    // The guard applies only while the pet shows another session's status: the shown session's
+    // own SessionEnd (killed mid-run, no Stop) must still reset the pet
+    if (
+      status === STATUS.IDLE &&
+      (event === "SessionStart" || event === "SessionEnd") &&
+      statusSource.sessionId &&
+      statusSource.sessionId !== (sessionId || "") &&
+      otherSessionBusy(sessionId)
+    )
+      return true;
+    pushStatus(status, message, { sessionId: sessionId || "", event: event || "" });
+    return true;
   }
   // Sessions that died without a SessionEnd hook fall off after 3h of silence
   setInterval(() => {
@@ -568,6 +693,32 @@ function startApp() {
   function menuAction(action) {
     sendToRenderer("menu-action", action);
   }
+  // Wardrobe (§4.5): Auto, None, then the hats the sheet has (the renderer sends their ids)
+  const HAT_LABELS = {
+    party: "🎉 Party hat",
+    tophat: "🎩 Top hat",
+    crown: "👑 Crown",
+    beanie: "⛄ Beanie",
+    santa: "🎅 Santa hat",
+    wizard: "🔮 Wizard hat",
+    catears: "🐱 Cat ears",
+    bow: "🎀 Bow",
+    shades: "😎 Shades",
+    hardhat: "👷 Hard hat",
+  };
+  function wardrobeMenu(s) {
+    const cur = typeof s.hat === "string" && s.hat ? s.hat : "auto";
+    const have = Array.isArray(s.hats) ? s.hats.filter((id) => typeof id === "string" && HAT_LABELS[id]) : [];
+    const radio = (id, label) => ({ label, type: "radio", checked: cur === id, click: () => menuAction(`hat:${id}`) });
+    return [
+      radio("auto", "📅 Auto (seasonal)"),
+      radio("none", "🚫 None"),
+      { type: "separator" },
+      ...Object.keys(HAT_LABELS)
+        .filter((id) => have.includes(id))
+        .map((id) => radio(id, HAT_LABELS[id])),
+    ];
+  }
   ipcMain.on("show-menu", (event, state) => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
     const s = state || {};
@@ -577,6 +728,8 @@ function startApp() {
       { label: `🚶 Roam: ${s.roam ? "On" : "Off"}`, click: () => menuAction("toggle-roam") },
       { label: s.hidden ? "👋 Bring back from edge" : "🙈 Hide at screen edge", click: () => menuAction("toggle-hide") },
       { label: `😈 Mischief: ${s.mischief === false ? "Off" : "On"}`, click: () => menuAction("toggle-mischief") },
+      // Hook reactions (pet-config.json {reactions}); saved by the renderer through set-config
+      { label: `🔔 Reactions: ${s.reactions === false ? "Off" : "On"}`, click: () => menuAction("toggle-reactions") },
       {
         label: "🚀 Start with Windows",
         type: "checkbox",
@@ -595,14 +748,28 @@ function startApp() {
           { label: "🌸 Flower", click: () => menuAction("flower") },
           { label: "🍟 Snack time", click: () => menuAction("snack") },
           { label: "😴 Nap", click: () => menuAction("nap") },
+          { label: "💃 Dance", click: () => menuAction("dance") },
+          { label: "😎 Be cool", click: () => menuAction("cool") },
+          { label: "😲 Boo!", click: () => menuAction("boo") },
+          { label: "🍱 Chomp", click: () => menuAction("chomp") },
+          { label: "💕 Love", click: () => menuAction("love") },
+          { label: "😪 Yawn", click: () => menuAction("yawn") },
           { type: "separator" },
           { label: "🤾 Fling me", click: () => menuAction("fling") },
           { label: "🐦 Perch on a window", click: () => menuAction("perch") },
           { label: "🎣 Steal the cursor", click: () => menuAction("steal-cursor") },
         ],
       },
+      {
+        // Radio items, saved by the renderer to pet-config.json {hat}; greyed for an imported skin
+        label: "👒 Wardrobe",
+        enabled: !!s.wardrobe,
+        submenu: wardrobeMenu(s),
+      },
       { type: "separator" },
       { label: "📥 Import pet…", click: () => menuAction("import-pet") },
+      // Only while an imported (or debug) skin is on
+      ...(s.customSkin ? [{ label: "🦀 Built-in Claw'd", click: () => menuAction("builtin-skin") }] : []),
       { label: "📌 Always on top", type: "checkbox", checked: !!s.onTop, click: () => menuAction("toggle-top") },
       { type: "separator" },
       { label: "🔄 Restart", click: () => restartApp() },
@@ -614,9 +781,163 @@ function startApp() {
     });
   });
 
+  // ─── Debug endpoints (QA) ────────────────────────────
+  // Registered only when unpackaged or with CLAWD_DEBUG=1, all in this one block. Every request
+  // must carry `X-Clawd-Debug: 1` (a custom header forces a CORS preflight, so a web page can't
+  // send it); OPTIONS on /debug/* answers 403, and these routes never send CORS headers.
+  const debugEnabled = !app.isPackaged || process.env.CLAWD_DEBUG === "1";
+  const hookEventCounts = { real: 0, injected: 0 }; // POST /status vs /debug/hook
+  let cursorPolls = 0; // get-cursor calls (cursor-watch must not poll while disarmed)
+  let cursorOverride = null; // { x, y, until } from POST /debug/cursor
+  let handleDebugRequest = null;
+  if (debugEnabled) {
+    const QA_NAME = /^[a-z0-9_-]{1,64}$/;
+    const SKIN_FILE = /^spritesheet[\w-]*\.webp$/;
+    const pending = new Map();
+    let seq = 0;
+    ipcMain.on("debug-reply", (event, msg) => {
+      const w = msg && pending.get(msg.id);
+      if (!w) return;
+      pending.delete(msg.id);
+      w(msg.result);
+    });
+    // Round trip to the renderer (renderer/pet.js runDebug)
+    const askRenderer = (cmd, args, timeoutMs = 3000) =>
+      new Promise((resolve) => {
+        if (!mainWindow || mainWindow.isDestroyed()) return resolve({ ok: false, error: "no window" });
+        const id = ++seq;
+        const t = setTimeout(() => {
+          pending.delete(id);
+          resolve({ ok: false, error: "renderer did not answer" });
+        }, timeoutMs);
+        pending.set(id, (r) => {
+          clearTimeout(t);
+          resolve(r);
+        });
+        mainWindow.webContents.send("debug-cmd", { id, cmd, args: args || {} });
+      });
+    const reply = (res, code, obj) => {
+      res.writeHead(code, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify(obj));
+    };
+    const readJson = (req) =>
+      new Promise((resolve, reject) => {
+        let body = "";
+        req.setEncoding("utf8");
+        req.on("data", (c) => {
+          body += c;
+          if (body.length > 65536) {
+            reject(new Error("body too large"));
+            req.destroy();
+          }
+        });
+        req.on("end", () => {
+          try {
+            resolve(body.trim() ? JSON.parse(body) : null);
+          } catch (e) {
+            reject(new Error("Invalid JSON"));
+          }
+        });
+        req.on("error", reject);
+      });
+    const routes = {
+      "POST /debug/anim": async (b) => [200, await askRenderer("anim", b || {})],
+      // {…hook-event fields…, status?, message?, cwd?}: the same path as POST /status (hook-event,
+      // then the status); without a status only the hook-event goes out
+      "POST /debug/hook": async (b) => {
+        const p = b || {};
+        hookEventCounts.injected++;
+        if (p.status == null) {
+          sendToRenderer("hook-event", hookEventOf(p, true));
+          return [200, { ok: true, status: "none" }];
+        }
+        const statusOk = ingestStatus(p, { injected: true });
+        if (!statusOk) sendToRenderer("hook-event", hookEventOf(p, true));
+        return [200, { ok: statusOk, status: statusOk ? "sent" : "invalid" }];
+      },
+      "POST /debug/emote": async (b) => [200, await askRenderer("emote", b || {})],
+      "POST /debug/hat": async (b) => [200, await askRenderer("hat", b || {})],
+      "POST /debug/date": async (b) => [200, await askRenderer("date", b || {})],
+      "POST /debug/cursor": async (b) => {
+        if (b && Number.isFinite(b.x) && Number.isFinite(b.y)) {
+          cursorOverride = { x: Math.round(b.x), y: Math.round(b.y), until: Date.now() + 60000 };
+        } else cursorOverride = null;
+        await askRenderer("cursor", { armed: !!cursorOverride });
+        return [200, { ok: true, cursor: cursorOverride }];
+      },
+      "POST /debug/skin": async (b) => {
+        const p = b || {};
+        if (p.reset) return [200, await askRenderer("skin", { reset: true })];
+        const file = String(p.file || "");
+        if (!SKIN_FILE.test(file) || !fs.existsSync(path.join(__dirname, "renderer", file))) {
+          return [400, { ok: false, error: "file must be a spritesheet*.webp in renderer/" }];
+        }
+        return [200, await askRenderer("skin", { file })];
+      },
+      "GET /debug/state": async () => {
+        const r = await askRenderer("state", {});
+        const metrics = app.getAppMetrics();
+        const cpu = metrics.reduce((s, m) => s + ((m.cpu && m.cpu.percentCPUUsage) || 0), 0);
+        const memMB = Math.round(metrics.reduce((s, m) => s + m.memory.workingSetSize, 0) / 1024);
+        return [200, { ...r, hookEvents: { ...hookEventCounts }, cursorPolls, cpu: Math.round(cpu * 10) / 10, memMB, port: PORT }];
+      },
+      // QA addition: runs the renderer's file-drop path on an absolute path (no OS drag needed)
+      "POST /debug/drop": async (b) => {
+        const p = String((b && b.path) || "");
+        if (!path.isAbsolute(p)) return [400, { ok: false, error: "path must be absolute" }];
+        return [200, await askRenderer("drop", { path: p }, 15000)];
+      },
+      "POST /debug/capture": async (b) => {
+        const name = String((b && b.name) || "");
+        if (!QA_NAME.test(name)) return [400, { ok: false, error: "name must match /^[a-z0-9_-]{1,64}$/" }];
+        const dir = process.env.CLAWD_QA_DIR ? path.resolve(process.env.CLAWD_QA_DIR) : app.isPackaged ? "" : path.join(__dirname, "tmp", "qa");
+        if (!dir) return [400, { ok: false, error: "set CLAWD_QA_DIR" }];
+        if (!mainWindow || mainWindow.isDestroyed()) return [500, { ok: false, error: "no window" }];
+        const img = await mainWindow.webContents.capturePage(undefined, { stayHidden: true });
+        fs.mkdirSync(dir, { recursive: true });
+        const file = path.join(dir, `${name}.png`);
+        fs.writeFileSync(file, img.toPNG());
+        const size = img.getSize();
+        return [200, { ok: true, path: file, width: size.width, height: size.height }];
+      },
+    };
+    const routePaths = new Set(Object.keys(routes).map((k) => k.split(" ")[1]));
+    handleDebugRequest = (req, res) => {
+      const url = String(req.url || "").split("?")[0];
+      if (!url.startsWith("/debug/")) return false;
+      if (req.method === "OPTIONS") {
+        res.writeHead(403);
+        res.end();
+        return true;
+      }
+      // DNS rebinding: a page that resolves its own name to 127.0.0.1 is same-origin and could
+      // send the header, but its Host header still names that page
+      if (!/^(127\.0\.0\.1|localhost):\d+$/.test(String(req.headers.host || ""))) {
+        reply(res, 403, { ok: false, error: "bad Host" });
+        return true;
+      }
+      const route = routes[`${req.method} ${url}`];
+      if (!route) {
+        if (!routePaths.has(url)) return false; // the older /debug/usage and /debug/crash-renderer, unchanged
+        reply(res, 405, { ok: false, error: "method not allowed" }); // no CORS header on a new path
+        return true;
+      }
+      if (req.headers["x-clawd-debug"] !== "1") {
+        reply(res, 403, { ok: false, error: "X-Clawd-Debug: 1 required" });
+        return true;
+      }
+      (req.method === "GET" ? Promise.resolve(null) : readJson(req))
+        .then((body) => route(body))
+        .then(([code, obj]) => reply(res, code, obj))
+        .catch((e) => reply(res, 400, { ok: false, error: String((e && e.message) || e) }));
+      return true;
+    };
+  }
+
   // ─── HTTP status server ──────────────────────────────
   function startHttpServer() {
     httpServer = http.createServer((req, res) => {
+      if (handleDebugRequest && handleDebugRequest(req, res)) return; // before any CORS header
       res.setHeader("Access-Control-Allow-Origin", "*");
       res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
       res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -645,15 +966,9 @@ function startApp() {
         req.on("data", (chunk) => (body += chunk));
         req.on("end", () => {
           try {
-            const { status, sessionId, cwd, event } = JSON.parse(body);
-            let { message } = JSON.parse(body);
-            touchSession(sessionId, cwd, event);
-            // With several sessions running, tag live bubbles with the project name
-            if (sessions.size >= 2 && cwd && message && (status === "running" || status === "waiting")) {
-              message = `[${path.basename(cwd)}] ${message}`;
-            }
-            if (Object.values(STATUS).includes(status)) {
-              pushStatus(status, message || "");
+            const payload = JSON.parse(body);
+            hookEventCounts.real++;
+            if (ingestStatus(payload || {}, { injected: false })) {
               res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
               res.end(JSON.stringify({ ok: true }));
             } else {
@@ -684,6 +999,7 @@ function startApp() {
           try {
             const data = JSON.parse(body);
             lastWindows = { fg: data.fg || null, claude: data.claude || null };
+            if (IS_DEV) devScenarioWindows = true;
             sendToRenderer("windows-update", lastWindows);
             res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
             res.end(JSON.stringify({ ok: true }));
@@ -826,7 +1142,9 @@ function startApp() {
 
   // ─── Fullscreen watcher (PowerShell helper, prints FS:0/FS:1 on change) ──
   function startFullscreenWatcher() {
-    if (process.platform !== "win32" || quitting) return;
+    // The dev instance never reacts to the user's real fullscreen apps or windows (it would walk
+    // on-screen to hide, or perch); QA drives those through POST /fullscreen and /windows
+    if (process.platform !== "win32" || quitting || IS_DEV) return;
     const script = path.join(__dirname, "scripts", "fullscreen-watch.ps1");
     if (!fs.existsSync(script)) return;
     let child;
@@ -1182,7 +1500,7 @@ function startApp() {
       log.error("tray failed:", e.message);
       return;
     }
-    tray.setToolTip("Claw'd — Claude Code pet");
+    tray.setToolTip(IS_DEV ? "Claw'd (dev)" : "Claw'd — Claude Code pet");
     const rebuild = () => {
       const menu = Menu.buildFromTemplate([
         { label: "💬 Open Claude", click: () => openClaudeApp() },
@@ -1302,6 +1620,9 @@ function startApp() {
 
   // ─── Window geometry from the watcher (physical px → DIP) ──
   let lastWindows = { fg: null, claude: null };
+  // Dev instance (lead decision 7): no footprint overlay and no perching on the user's real
+  // windows (the watcher never starts in dev) until a scenario injects fake windows (POST /windows)
+  let devScenarioWindows = false;
   function rectToDip(w) {
     if (!w || typeof w.l !== "number") return null;
     if (w.l <= -30000 || w.r - w.l <= 0 || w.b - w.t <= 0) return null; // minimized / bogus
@@ -1384,6 +1705,7 @@ function startApp() {
   }
   ipcMain.on("footprint", (event, fp) => {
     if (fullscreenActive || !fp) return;
+    if (IS_DEV && !devScenarioWindows) return; // dev: footprints stay off until a scenario injects windows
     const win = createTrailWindow();
     if (!win || !trailBounds) return;
     const local = { x: fp.x - trailBounds.x, y: fp.y - trailBounds.y, dir: fp.dir, tone: fp.tone };
@@ -1436,8 +1758,98 @@ function startApp() {
       cursorHelper = null;
     }
   }
-  ipcMain.handle("get-cursor", () => screen.getCursorScreenPoint());
+  ipcMain.handle("get-cursor", () => {
+    cursorPolls++;
+    if (cursorOverride && Date.now() < cursorOverride.until) return { x: cursorOverride.x, y: cursorOverride.y };
+    return screen.getCursorScreenPoint();
+  });
+
+  // ─── File chomp: what a dropped file "tastes" like ───
+  // Sizes and counts only: > 5 MB is "big" (stat only); a NUL in the first 8 KB is "binary";
+  // otherwise the file is streamed once to count "\n". Folders: up to 5000 entries and the most
+  // common extension. Nothing else is read, and only kind / size / counts are logged.
+  const INSPECT_BIG = 5 * 1024 * 1024;
+  async function inspectFile(p) {
+    if (typeof p !== "string" || !p || !path.isAbsolute(p)) return { error: "bad path" };
+    let st;
+    try {
+      st = await fs.promises.stat(p);
+    } catch (e) {
+      return { error: "missing" };
+    }
+    const name = path.basename(p);
+    const ext = path.extname(p).toLowerCase();
+    if (st.isDirectory()) {
+      let count = 0;
+      let capped = false;
+      const exts = new Map();
+      try {
+        const dir = await fs.promises.opendir(p);
+        for await (const d of dir) {
+          if (count >= 5000) {
+            capped = true;
+            break; // leaving the loop closes the directory
+          }
+          count++;
+          if (d.isFile()) {
+            const x = path.extname(d.name).toLowerCase();
+            if (x) exts.set(x, (exts.get(x) || 0) + 1);
+          }
+        }
+      } catch (e) {
+        return { error: "unreadable folder" };
+      }
+      let common = "";
+      let best = 0;
+      for (const [x, n] of exts) if (n > best) [common, best] = [x, n];
+      log.info(`inspect-file: folder, ${count}${capped ? "+" : ""} entries`);
+      return { kind: "dir", name, count, capped, ext: common };
+    }
+    if (!st.isFile()) return { error: "not a file" };
+    if (st.size > INSPECT_BIG) {
+      log.info(`inspect-file: big, ${st.size} bytes`);
+      return { kind: "big", name, size: st.size, ext };
+    }
+    return new Promise((resolve) => {
+      let done = false;
+      let seen = 0;
+      let lines = 0;
+      let last = -1;
+      const finish = (r) => {
+        if (done) return;
+        done = true;
+        if (r.kind) log.info(`inspect-file: ${r.kind}, ${st.size} bytes${r.kind === "file" ? `, ${r.lines} lines` : ""}`);
+        resolve(r);
+      };
+      // end is inclusive: at most INSPECT_BIG + 1 bytes, so a file that grew past the limit
+      // after the stat is reported as big instead of being read to EOF
+      const s = fs.createReadStream(p, { highWaterMark: 64 * 1024, end: INSPECT_BIG });
+      s.on("data", (chunk) => {
+        if (seen < 8192 && chunk.subarray(0, 8192 - seen).includes(0)) {
+          s.destroy();
+          finish({ kind: "binary", name, size: st.size, ext });
+          return;
+        }
+        seen += chunk.length;
+        for (let i = chunk.indexOf(10); i !== -1; i = chunk.indexOf(10, i + 1)) lines++;
+        if (chunk.length) last = chunk[chunk.length - 1];
+      });
+      s.on("end", () => {
+        // it grew past the limit after the stat: report its size now (stat only, nothing read)
+        if (seen > INSPECT_BIG) fs.stat(p, (e, st2) => finish({ kind: "big", name, size: st2 ? st2.size : seen, ext }));
+        else finish({ kind: "file", name, size: seen, ext, lines: lines + (seen > 0 && last !== 10 ? 1 : 0) });
+      });
+      s.on("error", () => finish({ error: "unreadable" }));
+    });
+  }
+  ipcMain.handle("inspect-file", (event, p) => inspectFile(p));
   ipcMain.on("set-cursor", (event, { x, y }) => {
+    // The dev instance never moves the user's real cursor (lead decision 7): the SET is logged and
+    // dropped, so a steal scenario sees "user took it back" or completes on a /debug/cursor fake
+    if (IS_DEV) {
+      log.info(`(dev) cursor SET ${Math.round(x)} ${Math.round(y)} dropped`);
+      return;
+    }
     const h = ensureCursorHelper();
     if (!h || !h.stdin || !h.stdin.writable) return;
     const p = screen.dipToScreenPoint({ x: Math.round(x), y: Math.round(y) });
@@ -1513,6 +1925,30 @@ function startApp() {
   ipcMain.handle("get-current-pet-id", () => getCurrentPetId());
   ipcMain.on("set-current-pet-id", (event, petId) => setCurrentPetId(petId));
 
+  // ─── Renderer settings (pet-config.json, whitelisted keys only) ───
+  // hat: "auto" | "none" | a hat id (Wardrobe); reactions: hook reactions on/off (Gate 3);
+  // birthday: "MM-DD" (a party hat that day). Nothing else in the file is readable or writable here.
+  function rendererConfig() {
+    const c = loadConfig();
+    return {
+      hat: typeof c.hat === "string" && c.hat ? c.hat : "auto",
+      reactions: c.reactions !== false,
+      birthday: typeof c.birthday === "string" ? c.birthday : null,
+    };
+  }
+  ipcMain.handle("get-config", () => rendererConfig());
+  ipcMain.handle("set-config", (event, patch) => {
+    const p = patch && typeof patch === "object" ? patch : {};
+    const clean = {};
+    if (typeof p.hat === "string" && /^[a-z][a-z0-9-]{0,23}$/.test(p.hat)) clean.hat = p.hat;
+    if (typeof p.reactions === "boolean") clean.reactions = p.reactions;
+    if (p.birthday === null || (typeof p.birthday === "string" && /^(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$/.test(p.birthday))) {
+      clean.birthday = p.birthday;
+    }
+    if (Object.keys(clean).length) saveConfig(clean);
+    return rendererConfig();
+  });
+
   // ─── App lifecycle ───────────────────────────────────
   app.commandLine.appendSwitch("disable-gpu");
   app.disableHardwareAcceleration();
@@ -1583,7 +2019,7 @@ function startApp() {
     createTray();
     startFullscreenWatcher();
     startIdleMonitor();
-    createTrailWindow(); // pre-create so the first footprint isn't lost while it loads
+    if (!IS_DEV) createTrailWindow(); // pre-create so the first footprint isn't lost while it loads (dev: on demand only)
     startUsagePrefetch();
 
     // Start with Windows: default ON for the packaged app, remembered in config. The Run value is

@@ -42,9 +42,21 @@ body {
     transform-origin: bottom center;
     width: 192px; /* 固定宽度，永不改变 */
     height: 208px; /* 固定高度，永不改变 */
-    overflow: hidden; /* 防止拖拽/动画切帧时精灵图溢出导致视觉上容器变宽 */
+    /* visible: hats and emotes reach past the cell (the sprite itself is exactly one cell, so
+       nothing of it bleeds); #pet-stage still clips to the window */
+    overflow: visible;
     pointer-events: none;
     /* 刻意不设 transition：拖拽时只移动窗口，不改变容器尺寸/缩放，保证宠物跟手 */
+}
+
+/* One sprite cell. Receives the climb rotation (transform) and the look-hold breath (the
+   independent translate property); the overlays inside inherit both, plus the container's scale,
+   lifting / dropping squash, entry animation and waiting blink. */
+#pet-body {
+    position: relative;
+    width: 192px;
+    height: 208px;
+    pointer-events: none;
 }
 
 #pet-sprite {
@@ -56,6 +68,33 @@ body {
     /* 像素画直接硬边渲染; remove-fringe 滤镜是给照片抠图用的, 会啃掉描边 */
     image-rendering: pixelated;
     pointer-events: none;
+}
+
+/* Per-play mirror (a left-going trot). The climb rotation lives on #pet-body, so the sprite's
+   own transform is free for it. */
+#pet-sprite.flip {
+    transform: scaleX(-1);
+}
+
+/* Hat (160×128 cell of hats.webp) and emote (96×96 cell of emotes.webp): positioned per frame by
+   pet.js from renderer/overlay.js; the sheet URL comes from CLAWD_META */
+#pet-hat,
+#pet-emote {
+    position: absolute;
+    left: 0;
+    top: 0;
+    display: none;
+    background-repeat: no-repeat;
+    image-rendering: pixelated;
+    pointer-events: none;
+}
+#pet-hat {
+    width: 160px;
+    height: 128px;
+}
+#pet-emote {
+    width: 96px;
+    height: 96px;
 }
 
 #pet-hitbox {
@@ -490,19 +529,19 @@ body {
 }
 
 /* ─── Wall climbing ─────────────────────────────── */
-/* Rotate the sprite so its feet face the wall, and shift the container so the
+/* Rotate the body (sprite + overlays) so its feet face the wall, and shift the container so the
    feet touch the window edge (window itself sits flush against the screen edge). */
 #pet-container.climb-right {
     transform: translateX(calc(-50% + 95px)) scale(0.55);
 }
-#pet-container.climb-right #pet-sprite {
+#pet-container.climb-right #pet-body {
     transform: rotate(-90deg);
     transform-origin: 50% 50%;
 }
 #pet-container.climb-left {
     transform: translateX(calc(-50% - 95px)) scale(0.55);
 }
-#pet-container.climb-left #pet-sprite {
+#pet-container.climb-left #pet-body {
     transform: rotate(90deg);
     transform-origin: 50% 50%;
 }

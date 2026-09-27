@@ -1,0 +1,16 @@
+{
+  "session_id": "5e55a0a0-0000-4000-8000-00000000000a",
+  "prompt_id": "9a000000-0000-4000-8000-0000000000a1",
+  "transcript_path": "C:\\Users\\qa\\.claude\\projects\\C--Users-qa-projects-alpha\\5e55a0a0-0000-4000-8000-00000000000a.jsonl",
+  "cwd": "C:\\Users\\qa\\projects\\alpha",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "effort": {
+    "level": "high"
+  },
+  "tool_name": "Read",
+  "tool_input": {
+    "file_path": "C:\\Users\\qa\\projects\\alpha\\src\\app.js"
+  },
+  "tool_use_id": "toolu_qa_read_1"
+}

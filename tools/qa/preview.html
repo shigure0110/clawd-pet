@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Claw'd QA preview</title>
+<!--
+  QA preview of one pet stage (spec §7 C). Deterministic shots via query params:
+    ?anim=idle&frame=0&flip=1&hat=party&emote=bang&ecol=2&climb=left|right&hidden=1
+     &bubble=1&text=Thinking...&badge=1&bg=dark|light|checker|busy|%23rrggbb&scale=0.55&play=1&label=1
+  anim may be an alias. frame = displayed frame index (alias position). ecol = emote column (default 2 settle).
+  play=1 animates the row (intro + loop per meta), the emote pop (cols 0,1,2 then loop) and the hat follow-through.
+  Loads the real renderer/style.css, renderer/clawd_meta.js and renderer/overlay.js (executor B); when
+  overlay.js is missing, tools/qa/ref_overlay.js (reference impl) is used and the page says so.
+  Open from disk with Chrome (--allow-file-access-from-files not needed for CSS/img, only for fetch).
+-->
+<link rel="stylesheet" href="../../renderer/style.css" />
+<style>
+  html, body { width: 300px; height: 280px; }
+  #qa-bg { position: absolute; left: 0; top: 0; width: 300px; height: 280px; pointer-events: none; }
+  #qa-label { position: absolute; left: 2px; top: 2px; font: 9px/11px Consolas, monospace; color: #333;
+              background: rgba(255,255,255,.8); padding: 1px 3px; z-index: 20000; max-width: 294px; white-space: pre-wrap; }
+  #qa-label.dark { color: #eee; background: rgba(0,0,0,.6); }
+  #qa-preload { position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; left: -10px; top: -10px; }
+  /* zero-specificity fallbacks: B's style.css wins wherever it defines these */
+  :where(#pet-body) { position: relative; width: 192px; height: 208px; }
+  :where(#pet-hat) { position: absolute; width: 160px; height: 128px; background-repeat: no-repeat; image-rendering: pixelated; pointer-events: none; }
+  :where(#pet-emote) { position: absolute; width: 96px; height: 96px; background-repeat: no-repeat; image-rendering: pixelated; pointer-events: none; }
+</style>
+</head>
+<body>
+<div id="qa-bg"></div>
+<div id="pet-stage">
+  <div id="pet-speech-bubble"><span class="bubble-text"></span></div>
+  <div id="session-badge"></div>
+  <div id="pet-container">
+    <div id="pet-body">
+      <div id="pet-sprite"></div>
+      <div id="pet-hat"></div>
+      <div id="pet-emote"></div>
+    </div>
+    <div id="pet-hitbox"></div>
+  </div>
+</div>
+<div id="qa-label"></div>
+<!-- ?root= points the page at another renderer folder (relative, e.g. ../../tmp/c/mock_renderer/) -->
+<script>
+  (function () {
+    var r = new URLSearchParams(location.search).get("root") || "../../renderer/";
+    if (!/^[\w.\/-]+$/.test(r) || r.indexOf("//") >= 0) r = "../../renderer/";
+    if (r.slice(-1) !== "/") r += "/";
+    window.__root = r;
+    var h = '<div id="qa-preload">';
+    ["spritesheet.webp", "hats.webp", "emotes.webp"].forEach(function (f) {
+      h += '<img src="' + r + f + '" onerror="this.remove()" />';
+    });
+    document.write(h + "</div>");
+    document.write('<script src="' + r + 'clawd_meta.js"><\/script>');
+    document.write('<script src="' + r + 'overlay.js"><\/script>');
+  })();
+</script>
+<script>
+  window.__overlayImpl = window.ClawdOverlay ? "renderer/overlay.js (B)" : "ref_overlay.js (reference impl)";
+  if (!window.ClawdOverlay) document.write('<script src="ref_overlay.js"><\/script>');
+</script>
+<script>
+(function () {
+  "use strict";
+  const OLD_ROWS = [
+    ["idle", 6, [280, 110, 110, 140, 140, 320]], ["running-right", 8, [120, 120, 120, 120, 120, 120, 120, 220]],
+    ["running-left", 8, [120, 120, 120, 120, 120, 120, 120, 220]], ["waving", 4, [140, 140, 140, 280]],
+    ["jumping", 5, [140, 140, 140, 140, 280]], ["failed", 8, [140, 140, 140, 140, 140, 140, 140, 240]],
+    ["waiting", 6, [150, 150, 150, 150, 150, 260]], ["running", 6, [120, 120, 120, 120, 120, 220]],
+    ["review", 6, [150, 150, 150, 150, 150, 280]], ["typing", 6, [130, 130, 130, 130, 130, 200]],
+    ["flower", 6, [260, 260, 260, 260, 180, 260]], ["coffee", 6, [320, 320, 420, 420, 300, 320]],
+    ["water", 6, [320, 320, 420, 420, 300, 320]], ["fries", 6, [300, 260, 320, 300, 260, 320]],
+    ["sausage", 6, [320, 300, 340, 300, 340, 400]], ["gaming", 6, [140, 140, 160, 140, 160, 140]],
+    ["backflip", 8, [160, 90, 90, 90, 90, 90, 90, 260]], ["doze", 6, [600, 500, 500, 700, 500, 600]],
+    ["sleep", 6, [400, 400, 400, 400, 400, 400]], ["stretch", 6, [260, 260, 420, 420, 260, 300]],
+    ["phone", 6, [300, 300, 300, 300, 200, 300]], ["petted", 6, [220, 220, 220, 220, 220, 220]],
+  ];
+  const q = new URLSearchParams(location.search);
+  const P = {
+    anim: q.get("anim") || "idle", frame: parseInt(q.get("frame") || "0", 10) || 0,
+    flip: q.get("flip") === "1", hat: q.get("hat") || null, emote: q.get("emote") || null,
+    ecol: q.has("ecol") ? parseInt(q.get("ecol"), 10) : 2,
+    climb: q.get("climb") === "left" || q.get("climb") === "right" ? q.get("climb") : null,
+    hidden: q.get("hidden") === "1", bubble: q.get("bubble") === "1", badge: q.get("badge") === "1",
+    text: q.get("text") || "Thinking...", bg: q.get("bg") || "", scale: parseFloat(q.get("scale") || "0.55"),
+    play: q.get("play") === "1", label: q.get("label") === "1",
+  };
+  if (P.hidden && !P.climb) P.climb = "right";
+  const meta = window.CLAWD_META || null;
+  const OV = window.ClawdOverlay;
+  const errors = [];
+  errors.add = function (m) { if (this.indexOf(m) < 0) this.push(m); };
+
+  // atlas: old rows + meta rows + aliases
+  const rows = {};
+  OLD_ROWS.forEach(([n, f, d], i) => (rows[n] = { row: i, frames: f, frameDurations: d, loop: true }));
+  if (meta && meta.rows) Object.assign(rows, meta.rows);
+  function resolve(name) {
+    if (rows[name]) {
+      const r = rows[name];
+      return { base: name, row: r.row, idx: [...Array(r.frames).keys()], durs: r.frameDurations, entry: r };
+    }
+    const a = meta && meta.aliases && meta.aliases[name];
+    if (a && rows[a.of]) return { base: a.of, row: rows[a.of].row, idx: a.frameIndices, durs: a.frameDurations, entry: a };
+    return null;
+  }
+  const R = resolve(P.anim);
+  if (!R) errors.push("unknown anim " + P.anim + (meta ? "" : " (clawd_meta.js not generated yet)"));
+
+  // background
+  const bgEl = document.getElementById("qa-bg");
+  const bgs = {
+    dark: "#1e1e1e", light: "#ffffff",
+    checker: "repeating-conic-gradient(#d6d6d6 0 25%, #eeeeee 0 50%) 0 0 / 16px 16px",
+    busy: "repeating-linear-gradient(45deg, #5c84b4 0 9px, #c9a060 9px 18px, #4a7a4e 18px 27px, #d8d8d2 27px 36px, #963c60 36px 45px)",
+  };
+  if (P.bg) bgEl.style.background = bgs[P.bg] || P.bg;
+
+  const stage = document.getElementById("pet-stage");
+  const container = document.getElementById("pet-container");
+  const body = document.getElementById("pet-body");
+  const sprite = document.getElementById("pet-sprite");
+  const hatEl = document.getElementById("pet-hat");
+  const emEl = document.getElementById("pet-emote");
+
+  // does the real style.css already carry B's #pet-body refactor?
+  let hasBodyCss = false;
+  try {
+    for (const ss of document.styleSheets) {
+      if (!ss.href || !/renderer\/style\.css$/.test(ss.href)) continue; // only the real sheet counts
+      for (const rule of ss.cssRules || []) if (rule.selectorText && rule.selectorText.includes("pet-body")) hasBodyCss = true;
+    }
+  } catch (e) { /* file:// cross-origin sheets: assume not */ }
+  if (!hasBodyCss) {
+    const st = document.createElement("style");
+    st.textContent =
+      "#pet-container{overflow:visible !important}" +
+      "#pet-container.climb-right #pet-body{transform:rotate(-90deg);transform-origin:50% 50%}" +
+      "#pet-container.climb-left #pet-body{transform:rotate(90deg);transform-origin:50% 50%}";
+    document.head.appendChild(st);
+  }
+  if (P.climb) container.classList.add(P.climb === "right" ? "climb-right" : "climb-left");
+  if (Math.abs(P.scale - 0.55) > 1e-6) {
+    const off = P.climb === "right" ? " + 95px" : P.climb === "left" ? " - 95px" : "";
+    container.style.transform = "translateX(calc(-50%" + off + ")) scale(" + P.scale + ")";
+  }
+  // the sprite's own transform is set inline, so an old `.climb-* #pet-sprite` rotation can never double up
+  sprite.style.transform = P.flip ? "scaleX(-1)" : "none";
+  const ROOT = window.__root || "../../renderer/";
+  sprite.style.backgroundImage = "url(" + ROOT + "spritesheet.webp)";
+  hatEl.style.backgroundImage = "url(" + ROOT + "hats.webp)";
+  emEl.style.backgroundImage = "url(" + ROOT + "emotes.webp)";
+  if (meta && meta.hats) hatEl.style.width = meta.hats.cellW + "px", hatEl.style.height = meta.hats.cellH + "px";
+
+  const bubble = document.getElementById("pet-speech-bubble");
+  if (P.bubble) {
+    bubble.querySelector(".bubble-text").textContent = P.text;
+    bubble.classList.add("show-bubble");
+  }
+  const badge = document.getElementById("session-badge");
+  if (P.badge) { badge.textContent = "2"; badge.classList.add("show"); }
+
+  const state = { impl: window.__overlayImpl, cssRefactored: hasBodyCss, errors, frame: null, hat: null, emote: null };
+  window.__qa = state;
+  let prevHatTop = null, frameChanges = 0, lastPos = null;
+
+  function show(pos, ecol, emoteVisibleOverride) {
+    if (!R) return;
+    const bi = R.idx[Math.min(pos, R.idx.length - 1)];
+    sprite.style.backgroundPosition = -(bi * 192) + "px " + -(R.row * 208) + "px";
+    state.frame = { anim: P.anim, pos, base: R.base, row: R.row, frame: bi };
+    if (lastPos !== null && lastPos !== pos) frameChanges++;
+    lastPos = pos;
+    // hat
+    let hatH = 0;
+    if (P.hat && meta && meta.hats && OV) {
+      const hb = OV.hatBox(meta, P.anim, pos, {
+        flip: P.flip, climbSide: P.climb, hidden: P.hidden, bubbleVisible: P.bubble, badgeVisible: P.badge,
+        hatId: P.hat, animChanged: false, prevHatTop, frameChanges, tick: frameChanges,
+      });
+      state.hat = hb;
+      prevHatTop = hb.targetTop != null ? hb.targetTop : hb.top;
+      hatEl.style.display = hb.visible ? "block" : "none";
+      hatEl.style.left = hb.left + "px";
+      hatEl.style.top = hb.top + "px";
+      hatEl.style.backgroundPosition = hb.bgX + "px " + hb.bgY + "px";
+      hatEl.style.transformOrigin = (hb.originX != null ? hb.originX : 82) + "px 0";
+      hatEl.style.transform = hb.mirror ? "scaleX(-1)" : "none";
+      // as pet.js: the visible hat's height, whatever its anchor (spec §3.4 "H")
+      if (hb.visible) hatH = Number(meta.hats.list[P.hat].height) || 0;
+    } else {
+      hatEl.style.display = "none";
+      if (P.hat) errors.add("hat requested but meta.hats " + (meta ? "missing" : "(no meta)"));
+    }
+    // emote
+    if (P.emote && meta && meta.emotes && OV) {
+      const eb = OV.emoteBox(meta, P.anim, pos, {
+        flip: P.flip, climbSide: P.climb, hidden: P.hidden, bubbleVisible: P.bubble, badgeVisible: P.badge,
+        emote: P.emote, col: ecol, hatHeight: hatH,
+      });
+      state.emote = eb;
+      const vis = eb.visible && emoteVisibleOverride !== false;
+      emEl.style.display = vis ? "block" : "none";
+      emEl.style.left = eb.left + "px";
+      emEl.style.top = eb.top + "px";
+      emEl.style.backgroundPosition = eb.bgX + "px " + eb.bgY + "px";
+      // overlay.js returns originX/originY (ref_overlay.js: origin); reason (ref: why) - QA-runner fix, kept
+      const piv = eb.originX != null ? [eb.originX, eb.originY] : eb.origin || (eb.anchor === "top" ? [50, 94] : [2, 94]);
+      emEl.style.transformOrigin = piv[0] + "px " + piv[1] + "px";
+      emEl.style.transform = eb.rotate ? "rotate(" + eb.rotate + "deg)" : "none";
+    } else {
+      emEl.style.display = "none";
+      if (P.emote) errors.add("emote requested but meta.emotes " + (meta ? "missing" : "(no meta)"));
+    }
+    renderLabel();
+  }
+
+  function renderLabel() {
+    const lab = document.getElementById("qa-label");
+    if (!P.label && !errors.length) { lab.style.display = "none"; return; }
+    lab.className = P.bg === "dark" ? "dark" : "";
+    const f = state.frame ? state.frame.base + " f" + state.frame.frame : "?";
+    lab.textContent =
+      P.anim + " @" + (state.frame ? state.frame.pos : "?") + " (" + f + ")" + (P.flip ? " flip" : "") +
+      (P.climb ? " climb-" + P.climb : "") + (P.hidden ? " hidden" : "") +
+      (P.hat ? "\nhat " + P.hat + (state.hat && !state.hat.visible ? " hidden: " + (state.hat.why || state.hat.reason) : "") : "") +
+      (P.emote ? "\nemote " + P.emote + (state.emote && !state.emote.visible ? " hidden: " + (state.emote.why || state.emote.reason) : "") : "") +
+      "\n" + (OV && OV.__reference ? "REFERENCE overlay impl" : "overlay: renderer/overlay.js") +
+      (hasBodyCss ? "" : " · ref CSS") + (meta ? "" : " · NO META") +
+      (errors.length ? "\n! " + [...new Set(errors)].join("\n! ") : "");
+  }
+
+  if (!P.play) {
+    show(P.frame, P.ecol);
+  } else if (R) {
+    const e = R.entry;
+    const n = R.idx.length;
+    const loop = e.loop !== false;
+    const ls = e.loopStart || 0, le = e.loopEnd != null ? e.loopEnd : n - 1;
+    let pos = 0, t0 = performance.now();
+    const em = P.emote && meta && meta.emotes ? meta.emotes.list[P.emote] : null;
+    const pop = meta && meta.emotes ? meta.emotes.popMs : [90, 90, 90];
+    function emoteCol(t) {
+      if (!em) return P.ecol;
+      let acc = 0;
+      for (let i = 0; i < 3; i++) { acc += pop[i]; if (t < acc) return i; }
+      const cyc = em.loopMs.reduce((a, b) => a + b, 0);
+      let tt = (t - acc) % cyc;
+      for (let i = 0; i < em.loop.length; i++) { if (tt < em.loopMs[i]) return em.loop[i]; tt -= em.loopMs[i]; }
+      return em.loop[em.loop.length - 1];
+    }
+    function emoteAlive(t) {
+      if (!em || em.life == null) return { vis: true, op: 1 };
+      if (t >= em.life) return { vis: false, op: 0 };
+      return { vis: true, op: t >= em.fadeAt ? 0.5 : 1 };
+    }
+    let nextAt = t0 + R.durs[0];
+    function tick(now) {
+      if (now >= nextAt) {
+        if (pos < n - 1 && (!loop || pos < le)) pos++;
+        else if (loop) pos = ls;
+        nextAt = now + R.durs[pos];
+      }
+      const t = now - t0;
+      const al = emoteAlive(t);
+      emEl.style.opacity = al.op;
+      show(pos, emoteCol(t), al.vis);
+      requestAnimationFrame(tick);
+    }
+    show(0, emoteCol(0));
+    requestAnimationFrame(tick);
+  }
+  renderLabel();
+  document.title = "qa " + P.anim + " f" + P.frame + " · " + state.impl + (errors.length ? " · ERR" : "");
+})();
+</script>
+</body>
+</html>

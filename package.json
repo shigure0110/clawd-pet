@@ -6,7 +6,7 @@
   "scripts": {
     "start": "electron .",
     "notify": "node hooks/notify.js",
-    "build": "electron-packager . Clawd --platform=win32 --arch=x64 --out=dist --overwrite --icon=assets/icon.ico --ignore=\"^/dist\" --ignore=\"^/assets/make_.*\\.py$\" --ignore=\"^/logs\"",
+    "build": "electron-packager . Clawd --platform=win32 --arch=x64 --out=dist --overwrite --icon=assets/icon.ico --ignore=\"^/dist\" --ignore=\"^/assets/make_.*\\.py$\" --ignore=\"^/logs\" --ignore=\"^/tmp\" --ignore=\"^/tools\"",
     "hooks:install": "node scripts/setup-hooks.js install",
     "hooks:uninstall": "node scripts/setup-hooks.js uninstall"
   },

@@ -1,0 +1,13 @@
+{
+  "session_id": "5e55a0a0-0000-4000-8000-00000000000a",
+  "prompt_id": "9a000000-0000-4000-8000-0000000000a1",
+  "transcript_path": "C:\\Users\\qa\\.claude\\projects\\C--Users-qa-projects-alpha\\5e55a0a0-0000-4000-8000-00000000000a.jsonl",
+  "cwd": "C:\\Users\\qa\\projects\\alpha",
+  "permission_mode": "default",
+  "hook_event_name": "Stop",
+  "effort": {
+    "level": "high"
+  },
+  "last_assistant_message": "QA_SENTINEL_OUTPUT All 12 tests pass now.",
+  "stop_hook_active": false
+}

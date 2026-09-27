@@ -1,0 +1,25 @@
+{
+  "session_id": "5e55a0a0-0000-4000-8000-00000000000a",
+  "prompt_id": "9a000000-0000-4000-8000-0000000000a1",
+  "transcript_path": "C:\\Users\\qa\\.claude\\projects\\C--Users-qa-projects-alpha\\5e55a0a0-0000-4000-8000-00000000000a.jsonl",
+  "cwd": "C:\\Users\\qa\\projects\\alpha",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "effort": {
+    "level": "high"
+  },
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "npm test",
+    "description": "Run the test suite",
+    "timeout": 120000,
+    "run_in_background": false
+  },
+  "tool_use_id": "toolu_qa_test_1",
+  "tool_response": {
+    "stdout": "\n> alpha@1.0.0 test\n> jest\n\nPASS src/app.test.js\nTests:       12 passed, 12 total\nTime:        1.84 s\nQA_SENTINEL_OUTPUT\n",
+    "stderr": "",
+    "interrupted": false,
+    "isImage": false
+  }
+}

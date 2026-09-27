@@ -1,9 +1,32 @@
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('ccPet', {
+  // Dev instance (main started with CLAWD_PORT): mischief and roaming start off
+  isDev: process.argv.includes('--clawd-dev'),
+
+  // File chomp: the dropped file's path, then its size / line count / kind (never its contents)
+  pathForFile: (file) => (webUtils && webUtils.getPathForFile ? webUtils.getPathForFile(file) : ''),
+  inspectFile: (filePath) => ipcRenderer.invoke('inspect-file', filePath),
+
+  // Renderer settings in pet-config.json, whitelisted in main: { hat, reactions, birthday }
+  getConfig: () => ipcRenderer.invoke('get-config'),
+  setConfig: (patch) => ipcRenderer.invoke('set-config', patch),
+
+  // Debug bridge for the /debug/* routes (main only sends these when debugging is enabled)
+  onDebugCmd: (callback) => {
+    ipcRenderer.on('debug-cmd', (_event, msg) => callback(msg));
+  },
+  debugReply: (id, result) => ipcRenderer.send('debug-reply', { id, result }),
+
   // Claude Code status updates
   onStatusUpdate: (callback) => {
     ipcRenderer.on('status-update', (_event, data) => callback(data));
+  },
+
+  // One hook's reaction tags ({ event, tool, kind, cmd, ok, verdict, source, ntype, mode, toolUseId,
+  // limit, sessionId, project, ts, rich }); it arrives just before that hook's status-update
+  onHookEvent: (callback) => {
+    ipcRenderer.on('hook-event', (_event, data) => callback(data));
   },
 
   // Fullscreen app detection (true = a borderless fullscreen window is in front)

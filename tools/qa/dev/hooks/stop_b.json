@@ -1,0 +1,13 @@
+{
+  "session_id": "5e55b0b0-0000-4000-8000-00000000000b",
+  "prompt_id": "9b000000-0000-4000-8000-0000000000b1",
+  "transcript_path": "C:\\Users\\qa\\.claude\\projects\\C--Users-qa-projects-beta\\5e55b0b0-0000-4000-8000-00000000000b.jsonl",
+  "cwd": "C:\\Users\\qa\\projects\\beta",
+  "permission_mode": "default",
+  "hook_event_name": "Stop",
+  "effort": {
+    "level": "high"
+  },
+  "last_assistant_message": "QA_SENTINEL_OUTPUT The docs are tidy.",
+  "stop_hook_active": false
+}

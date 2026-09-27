@@ -1,0 +1,364 @@
+{
+  "_about": "written by make_fixtures.js; read by check_notify.js",
+  "sessions": {
+    "A": "5e55a0a0-0000-4000-8000-00000000000a",
+    "B": "5e55b0b0-0000-4000-8000-00000000000b"
+  },
+  "fixtures": {
+    "pre_read_1": {
+      "sessionId": "5e55a0a0-0000-4000-8000-00000000000a",
+      "event": "PreToolUse",
+      "status": "running",
+      "fields": {
+        "tool": "Read",
+        "kind": "read",
+        "cmd": "",
+        "mode": "default",
+        "toolUseId": "toolu_qa_read_1"
+      },
+      "message": "^Read: "
+    },
+    "pre_read_2": {
+      "sessionId": "5e55a0a0-0000-4000-8000-00000000000a",
+      "event": "PreToolUse",
+      "status": "running",
+      "fields": {
+        "tool": "Grep",
+        "kind": "read",
+        "cmd": "",
+        "toolUseId": "toolu_qa_read_2"
+      },
+      "message": "^Grep: applyState"
+    },
+    "pre_read_3": {
+      "sessionId": "5e55a0a0-0000-4000-8000-00000000000a",
+      "event": "PreToolUse",
+      "status": "running",
+      "fields": {
+        "tool": "Glob",
+        "kind": "read",
+        "cmd": "",
+        "toolUseId": "toolu_qa_read_3"
+      },
+      "message": "^Glob: "
+    },
+    "pre_edit": {
+      "sessionId": "5e55a0a0-0000-4000-8000-00000000000a",
+      "event": "PreToolUse",
+      "status": "running",
+      "fields": {
+        "tool": "Edit",
+        "kind": "edit",
+        "cmd": "",
+        "toolUseId": "toolu_qa_edit_1"
+      },
+      "message": "^Edit: "
+    },
+    "pre_bash_plain": {
+      "sessionId": "5e55a0a0-0000-4000-8000-00000000000a",
+      "event": "PreToolUse",
+      "status": "running",
+      "fields": {
+        "tool": "Bash",
+        "kind": "shell",
+        "cmd": "",
+        "toolUseId": "toolu_qa_bash_1"
+      },
+      "message": "^Bash: ls -la src$"
+    },
+    "post_bash_plain": {
+      "sessionId": "5e55a0a0-0000-4000-8000-00000000000a",
+      "event": "PostToolUse",
+      "status": "running",
+      "fields": {
+        "tool": "Bash",
+        "kind": "shell",
+        "cmd": "",
+        "ok": true,
+        "verdict": "",
+        "toolUseId": "toolu_qa_bash_1"
+      }
+    },
+    "pre_bash_test": {
+      "sessionId": "5e55a0a0-0000-4000-8000-00000000000a",
+      "event": "PreToolUse",
+      "status": "running",
+      "fields": {
+        "tool": "Bash",
+        "kind": "shell",
+        "cmd": "test",
+        "toolUseId": "toolu_qa_test_1"
+      },
+      "message": "^Bash: npm test$"
+    },
+    "post_bash_test_pass": {
+      "sessionId": "5e55a0a0-0000-4000-8000-00000000000a",
+      "event": "PostToolUse",
+      "status": "running",
+      "fields": {
+        "kind": "shell",
+        "cmd": "test",
+        "ok": true,
+        "verdict": "pass",
+        "toolUseId": "toolu_qa_test_1"
+      }
+    },
+    "post_bash_test_pass_obj": {
+      "sessionId": "5e55a0a0-0000-4000-8000-00000000000a",
+      "event": "PostToolUse",
+      "status": "running",
+      "fields": {
+        "kind": "shell",
+        "cmd": "test",
+        "ok": true,
+        "verdict": "pass",
+        "toolUseId": "toolu_qa_test_1"
+      },
+      "note": "tool_response object form (§4.6), not the documented string"
+    },
+    "post_bash_test_failtext": {
+      "sessionId": "5e55a0a0-0000-4000-8000-00000000000a",
+      "event": "PostToolUse",
+      "status": "running",
+      "fields": {
+        "kind": "shell",
+        "cmd": "test",
+        "ok": true,
+        "verdict": "fail",
+        "toolUseId": "toolu_qa_test_1"
+      }
+    },
+    "post_bash_test_unknown": {
+      "sessionId": "5e55a0a0-0000-4000-8000-00000000000a",
+      "event": "PostToolUse",
+      "status": "running",
+      "fields": {
+        "kind": "shell",
+        "cmd": "test",
+        "ok": true,
+        "verdict": "",
+        "toolUseId": "toolu_qa_test_1"
+      }
+    },
+    "pre_agent_a": {
+      "sessionId": "5e55a0a0-0000-4000-8000-00000000000a",
+      "event": "PreToolUse",
+      "status": "running",
+      "fields": {
+        "tool": "Agent",
+        "kind": "agent",
+        "cmd": "",
+        "toolUseId": "toolu_qa_agent_a"
+      }
+    },
+    "pre_agent_b": {
+      "sessionId": "5e55a0a0-0000-4000-8000-00000000000a",
+      "event": "PreToolUse",
+      "status": "running",
+      "fields": {
+        "tool": "Agent",
+        "kind": "agent",
+        "cmd": "",
+        "toolUseId": "toolu_qa_agent_b"
+      }
+    },
+    "post_agent_a": {
+      "sessionId": "5e55a0a0-0000-4000-8000-00000000000a",
+      "event": "PostToolUse",
+      "status": "running",
+      "fields": {
+        "tool": "Agent",
+        "kind": "agent",
+        "ok": true,
+        "verdict": "",
+        "toolUseId": "toolu_qa_agent_a"
+      }
+    },
+    "post_agent_b": {
+      "sessionId": "5e55a0a0-0000-4000-8000-00000000000a",
+      "event": "PostToolUse",
+      "status": "running",
+      "fields": {
+        "tool": "Agent",
+        "kind": "agent",
+        "ok": true,
+        "verdict": "",
+        "toolUseId": "toolu_qa_agent_b"
+      }
+    },
+    "pre_read_subagent": {
+      "sessionId": "5e55a0a0-0000-4000-8000-00000000000a",
+      "event": "PreToolUse",
+      "status": "running",
+      "fields": {
+        "tool": "Read",
+        "kind": "read",
+        "toolUseId": "toolu_qa_sub_read_1"
+      }
+    },
+    "pre_git_commit": {
+      "sessionId": "5e55a0a0-0000-4000-8000-00000000000a",
+      "event": "PreToolUse",
+      "status": "running",
+      "fields": {
+        "kind": "shell",
+        "cmd": "git-commit",
+        "toolUseId": "toolu_qa_git_1"
+      }
+    },
+    "pre_git_push": {
+      "sessionId": "5e55a0a0-0000-4000-8000-00000000000a",
+      "event": "PreToolUse",
+      "status": "running",
+      "fields": {
+        "kind": "shell",
+        "cmd": "git-push",
+        "toolUseId": "toolu_qa_git_2"
+      }
+    },
+    "pre_plan_mode": {
+      "sessionId": "5e55a0a0-0000-4000-8000-00000000000a",
+      "event": "PreToolUse",
+      "status": "running",
+      "fields": {
+        "tool": "Read",
+        "kind": "read",
+        "mode": "plan",
+        "toolUseId": "toolu_qa_plan_1"
+      }
+    },
+    "session_start_compact": {
+      "sessionId": "5e55a0a0-0000-4000-8000-00000000000a",
+      "event": "SessionStart",
+      "status": "idle",
+      "fields": {
+        "source": "compact",
+        "ok": null
+      }
+    },
+    "session_start_clear": {
+      "sessionId": "5e55a0a0-0000-4000-8000-00000000000a",
+      "event": "SessionStart",
+      "status": "idle",
+      "fields": {
+        "source": "clear",
+        "ok": null
+      }
+    },
+    "session_start_resume": {
+      "sessionId": "5e55a0a0-0000-4000-8000-00000000000a",
+      "event": "SessionStart",
+      "status": "idle",
+      "fields": {
+        "source": "resume",
+        "ok": null
+      }
+    },
+    "session_start_startup": {
+      "sessionId": "5e55a0a0-0000-4000-8000-00000000000a",
+      "event": "SessionStart",
+      "status": "idle",
+      "fields": {
+        "source": "startup",
+        "ok": null
+      }
+    },
+    "session_start_startup_b": {
+      "sessionId": "5e55b0b0-0000-4000-8000-00000000000b",
+      "event": "SessionStart",
+      "status": "idle",
+      "fields": {
+        "source": "startup",
+        "ok": null
+      }
+    },
+    "session_end": {
+      "sessionId": "5e55a0a0-0000-4000-8000-00000000000a",
+      "event": "SessionEnd",
+      "status": "idle",
+      "fields": {
+        "ok": null
+      }
+    },
+    "session_end_b": {
+      "sessionId": "5e55b0b0-0000-4000-8000-00000000000b",
+      "event": "SessionEnd",
+      "status": "idle",
+      "fields": {
+        "ok": null
+      }
+    },
+    "notification_permission": {
+      "sessionId": "5e55a0a0-0000-4000-8000-00000000000a",
+      "event": "Notification",
+      "status": "waiting",
+      "fields": {
+        "ntype": "permission_prompt",
+        "limit": false,
+        "ok": null
+      },
+      "message": "permission"
+    },
+    "notification_idle": {
+      "sessionId": "5e55a0a0-0000-4000-8000-00000000000a",
+      "event": "Notification",
+      "status": "waiting",
+      "fields": {
+        "ntype": "idle_prompt",
+        "limit": false,
+        "ok": null
+      },
+      "message": "waiting for your input"
+    },
+    "notification_limit": {
+      "sessionId": "5e55a0a0-0000-4000-8000-00000000000a",
+      "event": "Notification",
+      "status": "waiting",
+      "fields": {
+        "ntype": "quota_auto_resume_disabled",
+        "limit": true,
+        "ok": null
+      }
+    },
+    "user_prompt_submit": {
+      "sessionId": "5e55a0a0-0000-4000-8000-00000000000a",
+      "event": "UserPromptSubmit",
+      "status": "running",
+      "fields": {
+        "ok": null
+      },
+      "message": "^Thinking\\.\\.\\.$",
+      "messageChanged": true
+    },
+    "user_prompt_submit_b": {
+      "sessionId": "5e55b0b0-0000-4000-8000-00000000000b",
+      "event": "UserPromptSubmit",
+      "status": "running",
+      "fields": {
+        "ok": null
+      },
+      "message": "^Thinking\\.\\.\\.$",
+      "messageChanged": true
+    },
+    "stop": {
+      "sessionId": "5e55a0a0-0000-4000-8000-00000000000a",
+      "event": "Stop",
+      "status": "completed",
+      "fields": {
+        "ok": null
+      },
+      "message": "^alpha is ready for you$",
+      "messageChanged": true
+    },
+    "stop_b": {
+      "sessionId": "5e55b0b0-0000-4000-8000-00000000000b",
+      "event": "Stop",
+      "status": "completed",
+      "fields": {
+        "ok": null
+      },
+      "message": "^beta is ready for you$",
+      "messageChanged": true
+    }
+  }
+}

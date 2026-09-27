@@ -18,13 +18,24 @@
 
             <!-- Pet container -->
             <div id="pet-container">
-                <div id="pet-sprite"></div>
+                <!-- #pet-body carries the climb rotation and the look-hold breath; the hat and
+                     emote overlays ride on it (renderer/overlay.js places them) -->
+                <div id="pet-body">
+                    <div id="pet-sprite"></div>
+                    <div id="pet-hat"></div>
+                    <div id="pet-emote"></div>
+                </div>
                 <div id="pet-hitbox"></div>
             </div>
         </div>
 
         <!-- Context menu is native (Electron Menu.popup) — see main.js "show-menu" -->
 
+        <!-- window.CLAWD_META: rows 22+, aliases, anchors, emotes, hats (written by
+             assets/make_clawd_sprites.py). pet.js runs without it: the new names fall back to the
+             old rows and no overlays show. overlay.js: pure hat / emote placement maths. -->
+        <script src="clawd_meta.js"></script>
+        <script src="overlay.js"></script>
         <script src="pet.js"></script>
     </body>
 </html>

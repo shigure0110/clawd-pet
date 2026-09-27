@@ -1,0 +1,12 @@
+{
+  "session_id": "5e55a0a0-0000-4000-8000-00000000000a",
+  "transcript_path": "C:\\Users\\qa\\.claude\\projects\\C--Users-qa-projects-alpha\\5e55a0a0-0000-4000-8000-00000000000a.jsonl",
+  "cwd": "C:\\Users\\qa\\projects\\alpha",
+  "permission_mode": "default",
+  "hook_event_name": "Notification",
+  "notification_type": "quota_auto_resume_disabled",
+  "notification_title": "Claude Code",
+  "notification_message": "Usage limit reached. Auto-continue is off until the reset.",
+  "title": "Claude Code",
+  "message": "Usage limit reached. Auto-continue is off until the reset."
+}

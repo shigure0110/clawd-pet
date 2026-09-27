@@ -9,3 +9,8 @@ logs/
 
 renderer/spritesheet1.webp
 docs/_contact.png
+
+# QA harness (tools/qa): runtime output and scratch
+tmp/
+tools/qa/out/
+__pycache__/
