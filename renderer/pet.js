@@ -2245,7 +2245,7 @@ function startPettingTimer(engine) {
       if (!petting || engine.currentState !== "petted") return;
       engine.applyState("love");
       clearInterval(heartTimer);
-      heartTimer = setInterval(petHearts, 1200); // the row has its own hearts now
+      heartTimer = setInterval(petHearts, 2600); // the row has its own hearts now
     }, LOVE_AFTER_MS);
   }, 1200);
 }

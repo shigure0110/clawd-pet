@@ -9,7 +9,7 @@
     "surprised":       {"row": 26, "frames": 8, "frameDurations": [110,90,90,110,140,400,350,450],   "loop": false, "fallback": "jumping"},
     "plotting":        {"row": 27, "frames": 6, "frameDurations": [125,125,125,125,125,125],         "loop": true,  "fallback": "review"},
     "yawn":            {"row": 28, "frames": 8, "frameDurations": [220,160,200,450,300,140,220,500], "loop": false, "fallback": "idle"},
-    "love":            {"row": 29, "frames": 8, "frameDurations": [125,125,125,125,125,125,125,125], "loop": true,  "fallback": "waving"},
+    "love":            {"row": 29, "frames": 8, "frameDurations": [250,250,250,250,250,250,250,250], "loop": true,  "fallback": "waving"},
     "laugh":           {"row": 30, "frames": 6, "frameDurations": [90,100,100,100,100,100],          "loop": true,  "loopStart": 1, "loopEnd": 5, "fallback": "waving"},
     "nervous":         {"row": 31, "frames": 8, "frameDurations": [125,125,125,125,125,125,125,125], "loop": true,  "fallback": "waiting"},
     "fingers-crossed": {"row": 32, "frames": 4, "frameDurations": [120,120,260,120],                 "loop": true,  "fallback": "waiting"},
